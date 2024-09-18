@@ -4,7 +4,7 @@
 Josué Rodríguez-Ramos1*, Natalie Sadler1*, Elias K. Zegeye1, Yulia Farris1, Samuel Purvine2, Sneha Couvillion1, William C. Nelson1, Kirsten Hofmockel1
 
 Affiliation:
-1 Pacific Northwest National Laboratory Biological Sciences Division
+1 Pacific Northwest National Laboratory Biological Sciences Division \
 2 Pacific Northwest National Laboratory Environmental and Molecular Sciences Laboratory
 
 ## Abstract: 
