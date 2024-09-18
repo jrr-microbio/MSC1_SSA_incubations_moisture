@@ -1,5 +1,7 @@
 ## Supplementary code for manuscript titled: Environmental matrix and hydrology are key determinants of microbial community composition and expression in a reduced complexity soil-analog 
 
+The supplementary tables that area added here contain multiple sheets that are the direct inputs to the R markdown code "Ω_Supplemental_code_upload.Rmd". Within the Rmd there are specific isntances of which sheet from which table to use as input. The rest should be (for the most part) automated to generate all figures and statistics that were used in the manuscript.
+
 ## Author list: 
 Josué Rodríguez-Ramos1*, Natalie Sadler1*, Elias K. Zegeye1, Yulia Farris1, Samuel Purvine2, Sneha Couvillion1, William C. Nelson1, Kirsten Hofmockel1
 
