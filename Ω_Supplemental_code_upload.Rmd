@@ -1,0 +1,1961 @@
+t---
+title: "Ω_2.1_Metaphenomes_forUpload"
+author: "Josué Rodríguez-Ramos"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r empty copy/paste chunk}
+```
+
+#Load libraries
+
+```{r load base libraries}
+library(tidyr)
+library(ggplot2)
+library(edgeR)
+library(stringr)
+library(rstatix)
+library(ggpubr)
+library(wesanderson)
+library(tibble)
+library(mctoolsr)
+library(ggnewscale)
+library(dplyr)
+library(reshape2)
+library(tidyverse)
+library(reticulate)
+library(forcats)
+library(patchwork)
+library(DESeq2)
+library(ashr)
+library(ggrepel)
+library(pls)
+library(vegan)
+
+```
+
+#TMM normalizations and statistics:
+
+```{r load data and calculate normalization}
+
+################## step 1: filter out genes with less than 5 counts
+
+#read in the data. This is output straight from featureCounts (has IDs (gene and genome) as well as lengths).
+#File = supplementary file 1 table B.
+counts = read.delim("_featureCounts_29_MAGs_output_reverse-stranded_paired_genome.txt", header = T, sep="\t") #only thing i did to this was remove the topmost row from featurecounts which doesnt let me read it in and change the column IDs to the actual sample names instead of full paths.
+
+counts = counts[,-c(2:5)] #remove the column with the genome IDs for now.
+# add column of gene count sums. Reminder i have 24 samples.
+counts$sum=rowSums(counts[,3:27]) #my data table has column 1: IDs, column 2: lengths, column 3:27: counts
+# check range of count sums
+range(counts$sum)
+# removing genes with less than 5 counts.
+filtered_counts=counts %>%
+   filter(sum>=5) #make sure counts >5
+range(filtered_counts$sum)
+filtered_counts=subset(filtered_counts, select=-c(sum)) #remove sum counts column
+# removing genes that are in present in less than ~10% of samples (i.e., 3 samples)
+filtered_counts_forRPK_metaT=filtered_counts %>%
+  filter(rowSums(.[, -1:-2] > 0) >= 3)
+
+#We now have a df of transcripts >5 counts appearing in at least 3 samples. TPM time.
+
+#These commands are mainly from the supplementary file 4 from the geTMM paper.
+
+#Going to pull out the gene lengths to normalize the metaP in a few lines.
+counts
+
+################step 2: calculate rpk
+
+# calculate RPK
+rownames(filtered_counts_forRPK_metaT)=filtered_counts_forRPK_metaT$Geneid #wants rownames to be IDs.
+x_metaT = filtered_counts_forRPK_metaT[-1] #remove old ID column.
+rpk_metaT = ((x_metaT[,2:26]*10^3)/x_metaT[,1]) #note, we multiply by 10^3 here because geTMM expects kilobase pairs on lengths and featureCounts reports bps.
+x_metaT = x_metaT[-1] #remove lengths column from original x dataframe.
+group_metaT = c(rep("A",ncol(x_metaT)))
+
+#write.csv(rpk_metaT, file="rpk_29MAGs_MQHQ_normalized_metaT.csv")
+
+#TPM
+tpm_metaT = rpk_metaT
+for (i in 1:ncol(rpk_metaT) ) {
+  tpm_metaT[,i] = rpk_metaT[,i]/(sum(rpk_metaT[,i])/1e6)
+} 
+
+# write a table of per gene/sample TPM normalized geTMM values if you want.
+#write.csv(tpm_metaT, file="TPM_geTMM_29MAGs_MQHQ_normalized_metaT.csv")
+
+#write out the last file that we will want to keep out of this.
+filtered_counts_clean_metaT=x_metaT
+
+##
+
+#Now i'm going to read in the TPM normalized metagenomic abundance from coverM.
+#File = supplementary file 1 table D.
+
+tpm_metaG = read.csv("tpm_normalized_2xcov_75AF_noT0.csv", row.names=1, header=T)
+
+#Now i'm going to read in the metaP raw counts and modify those. For these, I am going to use a normalized spectral abundance factor normalization. Spectral counts are reported on a per-gene basis. I am going to calculate length of each of those genes (For the fraction of hits that are in genomes - ~85%) with biopython. I'm also going to remove anything that is only present in only 1 sample. 10% of metaP is 1.6, just going to use "at least 2 samples" as the cutoff. I'm also going to normalize to 1 million instead of 100 just so i can make 1 single plot later for the stacked bar chart SOM figure.
+
+#File = supplementary file 1 table C.
+gene_metaP_counts = read.csv("raw_spectral_matches_in_genomes.csv", header=T)
+
+gene_metaP_counts_filtered = gene_metaP_counts %>%
+  select(-c(3:9)) %>% #remove things i dont need from original files
+  mutate_all(~ifelse(is.na(.), 0, .)) %>% #if value is NA just make it 0.
+  rowwise() %>% 
+  filter(sum(c_across(3:18) != 0) >= 2) %>% #remove anything that is not present in at least 2 samples.
+  mutate(across(3:18, ~ ./gene_length, .names = "normalized_{.col}")) %>%
+  select(-c(2:18)) %>%
+  column_to_rownames(var="BestProtein")
+
+gene_metaP_counts_filtered_norm = gene_metaP_counts_filtered
+
+#Calcultae NSAF:
+for (i in 1:ncol(gene_metaP_counts_filtered) ) {
+  gene_metaP_counts_filtered_norm[,i] = gene_metaP_counts_filtered[,i]/(sum(gene_metaP_counts_filtered[,i])/1e6)
+} 
+
+#write.csv(gene_metaP_counts_filtered_norm, file="normalized_metaP_per_gene.csv")
+
+#File = supplementary file 1 Table F
+gene_to_MAG_conversion_table = read.delim("_scaffold_to_MAG_conversion_table_v4.txt", header = T, sep = "\t")
+gene_to_MAG_conversion_table = gene_to_MAG_conversion_table %>%
+  select(final_MAG_gene_id, genome_id, final_scaffold_id_or_in_house_srmg_id, size)
+
+genome_metaP_counts_filtered_norm = gene_metaP_counts_filtered_norm %>%
+  rownames_to_column(var="gene_id") %>%
+  left_join(gene_to_MAG_conversion_table, by=c("gene_id"="final_scaffold_id_or_in_house_srmg_id")) %>%
+  select(-c(18,20)) %>%
+  select(genome_id, everything()) %>%
+  select(-c(2)) %>%
+  pivot_longer(cols=-genome_id,
+               names_to = "sample",
+               values_to = "value") %>%
+  group_by(genome_id, sample) %>%
+  summarize(Total_Abundance = sum(value)) #make the summarize command be the sum of all values and make a column called "total abundance"
+
+variables_to_keep = c("tpm_metaT","tpm_metaG", "filtered_counts_clean_metaT","genome_metaP_counts_filtered_norm", "gene_metaP_counts_filtered_norm", "rpk_metaT")
+rm(list=setdiff(ls(), variables_to_keep)) #clean out the environment. Keep the raw tpm from Step 1 and the filtered counts.
+```
+
+```{r geTMM based: Stacked Barchart}
+
+#Going to aggregate these genes at the genome level first. Read in the table from above into a clean environment, and then link the genome IDs from my merging table.
+
+#File = supplementary file 1 Table F
+tpm_mod_metaT = rownames_to_column(tpm_metaT, "gene_id")
+genome_ids=read.delim("_scaffold_to_MAG_conversion_table_v4.txt", header = T, sep = "\t") #scaffold conversion table that is on the server.
+genome_ids=genome_ids %>%
+  select(dram_and_featurecounts_id, final_MAG_gene_id, genome_id, final_scaffold_id_or_in_house_srmg_id) #only need three columns from that.
+
+mod_TPM_genomes_metaT=left_join(tpm_mod_metaT, genome_ids, by=c("gene_id"="dram_and_featurecounts_id")) #join tpm with the updated ids.
+
+mod_TPM_genomes_metaT=mod_TPM_genomes_metaT %>%
+  select(genome_id, everything()) %>% #move to front
+  select(final_MAG_gene_id, everything()) %>%
+  select(-gene_id, -final_MAG_gene_id, -final_scaffold_id_or_in_house_srmg_id) #make genome ID first column then remove the rest of the noise we don't need. Focusing first on genome-resolved expression.
+sum(is.na(mod_TPM_genomes_metaT$genome_id)) #confirm everything merged ok. No NAs, all good.
+
+#File = Supplementary file 1 TableG_SampleMetadata
+metadat = read.delim("_activity_2.1_transcriptomics_metadata_v2.csv", header = T, sep=",") #read in metadata
+
+#file = supplementary file 1 table A.
+taxonomy = read.delim("_29_MAG_gtdbtk.bac120.summary.tsv", header=T, sep = "\t") #read in taxonomy.
+
+taxonomy = taxonomy %>%
+  select(1:20)
+
+#making a subset here that doesn't include T0 vs T4 because the treatments are not as clean cut.
+mod_TPM_genomes_metaT = mod_TPM_genomes_metaT %>%
+  select(-c(2:6))
+
+long_mod_TPM_MAGs_metaT = pivot_longer(mod_TPM_genomes_metaT, 
+                        cols = -genome_id, 
+                        names_to = "sample",
+                        values_to = "value") #pivot longer so i can merge metadata and use ggplot2
+
+sum(is.na(mod_TPM_genomes_metaT$genome_id)) #confirm everything merged ok. No NAs, all good.
+sum(is.na(mod_TPM_genomes_metaT$sample)) #confirm everything merged ok. No NAs, all good.
+sum(is.na(mod_TPM_genomes_metaT$value)) #confirm everything merged ok. No NAs, all good.
+
+long_mod_TPM_MAGs_metadata_metaT=left_join(long_mod_TPM_MAGs_metaT, metadat, by=c("sample"="samplename")) #join tpm long with metadata.
+long_mod_TPM_MAGs_metadata_taxonomy_metaT=left_join(long_mod_TPM_MAGs_metadata_metaT, taxonomy, by=c("genome_id"="user_genome")) #join tpm long and metadata with taxonomy.
+long_mod_TPM_MAGs_metadata_taxonomy_metaT=long_mod_TPM_MAGs_metadata_taxonomy_metaT[1:9] #remove some of the extra gtdb stuff i am not going to use.
+sum(is.na(long_mod_TPM_MAGs_metadata_taxonomy_metaT$classification)) #confirm everything merged ok. No NAs, all good.
+
+aggregated_df_MAGs_metaT = long_mod_TPM_MAGs_metadata_taxonomy_metaT %>%
+  group_by(genome_id, sample) %>% #aggregate based on genome_id in each sample.
+  summarize(Total_Abundance = sum(value)) #make the summairze command be the sum of all values and make a column called "total abundance"
+aggregated_df_MAGs_taxonomy_metaT=left_join(aggregated_df_MAGs_metaT, taxonomy, by=c("genome_id"="user_genome")) #join tpm long and metadata with taxonomy.
+aggregated_df_MAGs_taxonomy_metaT=aggregated_df_MAGs_taxonomy_metaT[1:4] #remove some of the extra gtdb stuff i am not going to use.
+length(unique(aggregated_df_MAGs_taxonomy_metaT$genome_id)) #confirm 29 MAGs here.
+aggregated_df_MAGs_taxonomy_shortTax_metaT=aggregated_df_MAGs_taxonomy_metaT #make new df so i can make pretty without messing with this.
+aggregated_df_MAGs_taxonomy_shortTax_metaT$classification = sub(".*?;g", "g", aggregated_df_MAGs_taxonomy_shortTax_metaT$classification) #make pretty.
+
+aggregated_df_MAGs_wide_metaT = aggregated_df_MAGs_metaT %>%
+  pivot_wider(names_from=genome_id, 
+              values_from=Total_Abundance,
+              values_fill = 0) %>%
+  column_to_rownames(var = "sample") %>%
+  t()
+
+#write.csv(aggregated_df_MAGs_taxonomy_shortTax, file="long_format_expression_29MAGs.csv") #write to csv if you want.
+#write.csv(aggregated_df_MAGs_wide, file="wide_MAG_summed_abunds.csv") #write to csv if you want.
+
+###
+#Make a stacked barchart of above.
+###
+
+#Color palette for figure made from multiple pokemons. Followed by stacked bar charts of abundances across all samples.
+mcolors=c("#8b6220", "#8b6a52", "#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#156ae5", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#ff9c62", "#c5c5c5", "#104a62", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#eee652", "#de9400")
+ggplot_stackedBars = aggregated_df_MAGs_taxonomy_shortTax_metaT %>%
+  ggplot(aes(fill=classification, y=Total_Abundance, x=sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Aggregated TPM per MAG") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG expression across samples") +
+  theme(plot.title = element_text(hjust = 0.5))
+ggplot_stackedBars
+#  ggsave("Figure1_StackedBars_29MAGs_Zissou1_mcolor_noT0.pdf", ggplot_stackedBars, width = 13, height = 8, units = "in")
+
+#Now lets work on plotting the metaG data along side that. I TPM normalized by scaffold length, so now i have to merge scaffold > genome.
+#file = supplementary file 1 TableH_ScaffoldToGenome_convers
+scaffold_ids=read.delim("_scaffold_to_MAG_conversion_table_metaG_v4.txt", header = T, sep = "\t") #scaffold conversion table that is on the server.
+scaffold_ids=scaffold_ids %>%
+  select(dram_and_featurecounts_id, final_MAG_scaffold_id, genome_id, final_assembly_JGI_scaffold_id_or_in_house_srmg_id) #only need three columns from that.
+
+tpm_metaG_genome_long = tpm_metaG %>%
+  rownames_to_column(var="genome_id") %>%
+  left_join(taxonomy, by=c("genome_id"="user_genome")) %>%
+  select(genome_id, classification, everything()) %>%
+  select(-c(7:24)) %>%
+  as.data.frame() %>%
+  pivot_longer(cols = -c(genome_id, classification), names_to = "sample", values_to = "value")
+
+tpm_metaG_genome_long$gtdb=sub(".*g__", "g__", tpm_metaG_genome_long$classification)
+tpm_metaG_genome_long=tpm_metaG_genome_long %>%
+  select(-c(classification))
+colnames(tpm_metaG_genome_long)[colnames(tpm_metaG_genome_long) == "value"] <- "Total_Abundance"
+colnames(tpm_metaG_genome_long)[colnames(tpm_metaG_genome_long) == "gtdb"] <- "classification"
+
+aggregated_df_MAGs_metaG = tpm_metaG_genome_long %>%
+  group_by(genome_id, sample, classification) %>% #aggregate based on genome_id in each sample.
+  summarize(Total_Abundance = sum(Total_Abundance)) #make the summairze command be the sum of all values and make a column called "total
+
+ggplot_stackedBars_metaG = aggregated_df_MAGs_metaG %>%
+  ggplot(aes(fill=classification, y=Total_Abundance, x=sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("TPM (metaG)") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG abundance across samples") +
+  theme(plot.title = element_text(hjust = 0.5))
+ggplot_stackedBars_metaG
+#ggsave("SOM_Fig_StackedBars_29MAGs_mcolor_noT0.pdf", ggplot_stackedBars_metaG, width = 13, height = 8, units = "in")
+
+#Should i just plot these for supplementary in the same exact plot? I don't see why not - both TPM.
+fullplot_df_long = rbind(aggregated_df_MAGs_taxonomy_shortTax_metaT,aggregated_df_MAGs_metaG)
+
+ggplot_stackedBars_full = fullplot_df_long %>%
+  ggplot(aes(fill=classification, y=Total_Abundance, x=sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Aggregated TPM per MAG") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG abundance across samples") +
+  theme(plot.title = element_text(hjust = 0.5))
+ggplot_stackedBars_full
+#ggsave("SOM_Fig_StackedBars_wExpression_29MAGs_mcolor_noT0.pdf", ggplot_stackedBars_full, width = 13, height = 8, units = "in")
+
+#Why stop there. I normalized the NSAF to 1e6, so i can just plot them all together and split up the figure later. Just easier for me personally to modify like this. All i gotta do is bring in the taxonomy into the metaP df.
+genome_metaP_counts_filtered_norm_tax = genome_metaP_counts_filtered_norm %>%
+  left_join(taxonomy, by=c("genome_id"="user_genome")) %>%
+  select(-c(5:22))
+
+genome_metaP_counts_filtered_norm_tax$classification=sub(".*g__", "g__", genome_metaP_counts_filtered_norm_tax$classification)
+
+metaG_metaT_metaP_df_long = rbind(aggregated_df_MAGs_taxonomy_shortTax_metaT,aggregated_df_MAGs_metaG,genome_metaP_counts_filtered_norm_tax)
+
+ggplot_stackedBars_fuller = metaG_metaT_metaP_df_long %>%
+  ggplot(aes(fill=classification, y=Total_Abundance, x=sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Aggregated TPM per MAG") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG abundance and expression across samples") +
+  theme(plot.title = element_text(hjust = 0.5))
+ggplot_stackedBars_fuller
+#ggsave("SOM_Fig_1_StackedBars_wExpression_full_29MAGs_mcolor_noT0_full.pdf", ggplot_stackedBars_fuller, width = 13, height = 8, units = "in")
+
+#Perfect - great little supplementary figure. Now i'm just going to proceed with some metaT analyses because that's really going to be the highlight of the publication (we had the most samples and the best recruitment).
+
+###
+#I'm going to try and now normalize TPM gene expression for each gene to the overall genome expression itself. That way if a genome is expressing more, the gene itself wont be differentially expressed just because of that, and will hopefully correlate to the metabolites better or give me better insights into the actually DE genes. We never actually used this data - 
+###
+
+mod_TPM_genomes_forNorm=left_join(tpm_mod_metaT, genome_ids, by=c("gene_id"="dram_and_featurecounts_id")) #join tpm with the updated ids.
+mod_TPM_genomes_forNorm=mod_TPM_genomes_forNorm %>%
+  select(genome_id, everything()) %>% #move to front
+  select(final_MAG_gene_id, everything()) %>%
+  select(-final_MAG_gene_id)
+
+mod_TPM_genomes_forNorm_long = mod_TPM_genomes_forNorm %>%
+  pivot_longer(cols = 3:27, 
+               names_to = "sample_id", 
+               values_to = "value")
+
+mod_TPM_genomes_forNorm_long_summed <- mod_TPM_genomes_forNorm_long %>%
+  group_by(genome_id, sample_id) %>%
+  mutate(sum_values = sum(value)) %>%
+  ungroup()
+
+mod_TPM_genomes_forNorm_long_summed$norm_expression=mod_TPM_genomes_forNorm_long_summed$value/mod_TPM_genomes_forNorm_long_summed$sum_values
+mod_TPM_genomes_forNorm_long_summed_taxonomy=left_join(mod_TPM_genomes_forNorm_long_summed, taxonomy, by=c("genome_id"="user_genome")) #join tpm long and metadata with taxonomy.
+mod_TPM_genomes_forNorm_long_summed_taxonomy=mod_TPM_genomes_forNorm_long_summed_taxonomy[1:8] #remove some of the extra gtdb stuff i am not going to use.
+sum(is.na(mod_TPM_genomes_forNorm_long_summed_taxonomy$classification)) #confirm everything merged ok. No NAs, all good.
+sum(is.na(mod_TPM_genomes_forNorm_long_summed_taxonomy$sum_values)) #confirm everything merged ok. No NAs, all good.
+mod_TPM_genomes_forNorm_long_summed_taxonomy$classification = sub(".*?;g", "g", mod_TPM_genomes_forNorm_long_summed_taxonomy$classification) #make pretty.
+
+normalized_TPM_to_genome_expression_long = mod_TPM_genomes_forNorm_long_summed_taxonomy %>%
+  select(-c(1,3,5:6)) #remove cols
+
+normalized_TPM_to_genome_expression_wide = normalized_TPM_to_genome_expression_long %>%
+  pivot_wider(id_cols = gene_id, names_from = sample_id, values_from = norm_expression) %>%
+  select(-c(2:6)) #pivot wider for wide df.
+#write.csv(normalized_TPM_to_genome_expression_wide, file="normalized_per_genome_expression_wide_format.csv") #write if you want.
+
+normalized_TPM_to_genome_expression_long = normalized_TPM_to_genome_expression_wide %>%
+  pivot_longer(cols = -gene_id, names_to = "sample_id", values_to = "norm_expression")
+
+#renaming some of these dfs for ease of readability for downstream analyses. Also making a handful of variations for each because different tools need different types of dfs. sigh. Probably an easier way but...oh well.
+TPM_MAG_resolved_long_metaT=aggregated_df_MAGs_metaT
+TPM_MAG_resolved_wide_metaT=aggregated_df_MAGs_metaT %>%
+    pivot_wider(id_cols=genome_id, names_from = sample, values_from = Total_Abundance)
+TPM_MAG_resolved_long_metaT_wTax=aggregated_df_MAGs_taxonomy_shortTax_metaT
+TPM_MAG_resolved_wide_metaT_wTax = aggregated_df_MAGs_taxonomy_metaT %>%
+  pivot_wider(names_from = sample, values_from = Total_Abundance)
+TPM_gene_resolved_long_metaT=tpm_mod_metaT %>%
+  select(-c(2:6)) %>% 
+  pivot_longer(cols = -gene_id, names_to = "sample", values_to = "value") #pivot longer so i can merge metadata and use ggplot2
+TPM_gene_resolved_wide_metaT=tpm_mod_metaT %>%
+  select(-c(2:6))
+metadat=metadat[-(1:5), ]
+filtered_counts_clean_metaT = filtered_counts_clean_metaT %>%
+  select(-c(1:5))
+genome_metaP_counts_filtered_norm_long = genome_metaP_counts_filtered_norm
+genome_metaP_counts_filtered_norm_wide = genome_metaP_counts_filtered_norm %>%
+  pivot_wider(id_cols=genome_id, names_from = sample, values_from = Total_Abundance)
+
+
+##
+##BEFORE MOVING ON, i want to real quick just check out the rpk, non TPM normalized abundances of the communities. I have a strong suspicion that upon structure introduction, community overall expression dips heavily.
+##
+
+
+mod_rpk_genomes_metaT= rpk_metaT %>%
+  rownames_to_column(var="gene_id") %>%
+  left_join(genome_ids, by=c("gene_id"="dram_and_featurecounts_id")) #join tpm with the updated ids.
+
+mod_rpk_genomes_metaT = mod_rpk_genomes_metaT %>%
+  select(genome_id, everything()) %>% #move to front
+  select(final_MAG_gene_id, everything()) %>%
+  select(-gene_id, -final_MAG_gene_id, -final_scaffold_id_or_in_house_srmg_id) #make genome ID first column then remove the rest of the noise we don't need. Focusing first on genome-resolved expression.
+sum(is.na(mod_TPM_genomes_metaT$genome_id)) #confirm everything merged ok. No NAs, all good.
+
+#making a subset here that doesn't include T0 vs T4 because the treatments are not as clean cut.
+mod_rpk_genomes_metaT = mod_rpk_genomes_metaT %>%
+  select(-c(2:6))
+
+long_mod_rpk_MAGs_metaT = pivot_longer(mod_rpk_genomes_metaT, 
+                        cols = -genome_id, 
+                        names_to = "sample",
+                        values_to = "value") #pivot longer so i can merge metadata and use ggplot2
+
+sum(is.na(mod_rpk_genomes_metaT$genome_id)) #confirm everything merged ok. No NAs, all good.
+sum(is.na(mod_rpk_genomes_metaT$sample)) #confirm everything merged ok. No NAs, all good.
+sum(is.na(mod_rpk_genomes_metaT$value)) #confirm everything merged ok. No NAs, all good.
+
+long_mod_rpk_MAGs_metadata_metaT=left_join(long_mod_rpk_MAGs_metaT, metadat, by=c("sample"="samplename")) #join rpk long with metadata.
+long_mod_rpk_MAGs_metadata_taxonomy_metaT=left_join(long_mod_rpk_MAGs_metadata_metaT, taxonomy, by=c("genome_id"="user_genome")) #join rpk long and metadata with taxonomy.
+long_mod_rpk_MAGs_metadata_taxonomy_metaT=long_mod_rpk_MAGs_metadata_taxonomy_metaT[1:9] #remove some of the extra gtdb stuff i am not going to use.
+sum(is.na(long_mod_rpk_MAGs_metadata_taxonomy_metaT$classification)) #confirm everything merged ok. No NAs, all good.
+
+aggregated_df_MAGs_rpk_metaT = long_mod_rpk_MAGs_metadata_taxonomy_metaT %>%
+  group_by(genome_id, sample) %>% #aggregate based on genome_id in each sample.
+  summarize(Total_Abundance = sum(value)) #make the summairze command be the sum of all values and make a column called "total abundance"
+aggregated_df_MAGs_rpk_taxonomy_metaT=left_join(aggregated_df_MAGs_rpk_metaT, taxonomy, by=c("genome_id"="user_genome")) #join rpk long and metadata with taxonomy.
+aggregated_df_MAGs_rpk_taxonomy_metaT=aggregated_df_MAGs_rpk_taxonomy_metaT[1:4] #remove some of the extra gtdb stuff i am not going to use.
+length(unique(aggregated_df_MAGs_rpk_taxonomy_metaT$genome_id)) #confirm 29 MAGs here.
+aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT=aggregated_df_MAGs_rpk_taxonomy_metaT #make new df so i can make pretty without messing with this.
+aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT$classification = sub(".*?;g", "g", aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT$classification) #make pretty.
+
+###
+#Make a stacked barchart of above.
+###
+
+ggplot_stackedBars_rpk = aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT %>%
+  ggplot(aes(fill=classification, y=Total_Abundance, x=sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Aggregated rpk per MAG") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG expression across samples") 
+ggplot_stackedBars_rpk
+#ggsave("SOM_Fig_X_StackedBars_RPK_29MAGs_mcolor_noT0_full.pdf", ggplot_stackedBars_rpk, width = 13, height = 8, units = "in")
+
+#One more time. Lets just aggregate it at the sample level and do some standard boxplots to compare to natalie's figures.
+aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes = aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT %>%
+  left_join(metadat, by=c("sample"="samplename")) %>% 
+  group_by(sample, moisture) %>% #aggregate based on genome_id in each sample.
+  summarize(Totaler_Abundance = sum(Total_Abundance)) #make the summairze command be the sum of all values and make a column called "total abundance"
+
+ggplot_boxplot_rpk = aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes %>%
+  ggplot(aes(fill=as.factor(moisture), y=Totaler_Abundance, x=as.factor(moisture))) + 
+  geom_boxplot() +
+  geom_point() + 
+  ylab("Aggregated rpk per treatment") +
+  scale_x_discrete(limits=rev)
+
+ggplot_boxplot_rpk
+#ggsave("SOM_Fig_X_boxplot_RPK_29MAGs_mcolor_noT0_full.pdf", ggplot_boxplot_rpk, width = 13, height = 8, units = "in")
+#write.csv(file="summed_abund_per_treatment.csv", aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes)
+
+# Pairwise comparisons
+#https://www.datanovia.com/en/lessons/pairwise-t-test/
+aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes_short = aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes %>%
+  ungroup() %>%
+  select(-c(1))
+
+pwc <- aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes_short %>% 
+  pairwise_t_test(Totaler_Abundance ~ moisture, pool.sd = FALSE, p.adjust.method = "fdr")
+pwc
+
+pwc = pwc %>% 
+  add_xy_position(x = "moisture", step.increase = 1)
+ggboxplot(aggregated_df_MAGs_rpk_taxonomy_shortTax_metaT_boxes_short, x = "moisture", y = "Totaler_Abundance") +
+  stat_pvalue_manual(pwc, hide.ns = TRUE) 
+
+#write out the last file that we will want to keep out of this.
+variables_to_keep = c("tpm_metaG", "TPM_metaT", "TPM_gene_resolved_wide_metaT", "TPM_gene_resolved_long_metaT", "normalized_TPM_to_genome_expression_long", "normalized_TPM_to_genome_expression_wide", "TPM_MAG_resolved_long_metaT", "TPM_MAG_resolved_wide_metaT", "metadat", "taxonomy", "filtered_counts_clean_metaT", "gene_metaP_counts_filtered_norm", "genome_metaP_counts_filtered_norm_long", "genome_metaP_counts_filtered_norm_wide")
+rm(list=setdiff(ls(), variables_to_keep)) #clean out the environment.
+
+
+```
+
+```{r geTMM based NMDS, PERMANOVA and stats}
+#######So these treatments are pretty distinct, so i'm going to split all of this data up into 3 different versions of files. 1) timepoint effects: timepoint 0 vs all timepoints 2. This one is going to be the iffiest because there is a lot of noise here and we're going to end up removing. 2) moisture effects: moisture 5, 15, and 20% as a continuous variable. 3) Structure effects: 100% moisture treatment vs an average of moisture 5,10, and 20.
+
+TPM_MAG_resolved_wide_metaT=as.data.frame(TPM_MAG_resolved_wide_metaT) #make dataframe for anosim so it doesn't yell.
+TPM_MAG_resolved_wide_metaT_NMDS = TPM_MAG_resolved_wide_metaT
+rownames(TPM_MAG_resolved_wide_metaT_NMDS)=TPM_MAG_resolved_wide_metaT_NMDS$genome_id #make column genome_id rownames for df.
+TPM_MAG_resolved_wide_metaT_NMDS=TPM_MAG_resolved_wide_metaT_NMDS[,-1] #now remove the genome_id column
+
+#Now we're going to start making our subsets with our newly formed pivot wider at the genome level.
+#Moisture effects subset
+moisture_samples=c("SM_0513_MT", "SM_0514_MT", "SM_0515_MT", "SM_0516_MT", "SM_0517_MT", "SM_0518_MT", "SM_0519_MT", "SM_0520_MT", "SM_0521_MT", "SM_0522_MT", "SM_0523_MT", "SM_0524_MT", "SM_0525_MT","SM_0526_MT", "SM_0527_MT")
+moisture_samples_bi=c("SM_0513_MT", "SM_0514_MT", "SM_0515_MT", "SM_0516_MT", "SM_0517_MT", "SM_0523_MT", "SM_0524_MT", "SM_0525_MT","SM_0526_MT", "SM_0527_MT") #I think some of the variability here is being obfuscated by the fact that this is a continuum. Going to calculate the statistic with first / last as well.
+structure_samples=c("SM_0508_MT", "SM_0509_MT", "SM_0510_MT", "SM_0511_MT", "SM_0512_MT", "SM_0513_MT", "SM_0514_MT", "SM_0515_MT", "SM_0516_MT", "SM_0517_MT")
+
+TPM_MAG_resolved_wide_metaT_NMDS_moisture=TPM_MAG_resolved_wide_metaT_NMDS[, moisture_samples]
+TPM_MAG_resolved_wide_metaT_NMDS_moisture_bi=TPM_MAG_resolved_wide_metaT_NMDS[, moisture_samples_bi]
+TPM_MAG_resolved_wide_metaT_NMDS_structure=TPM_MAG_resolved_wide_metaT_NMDS[, structure_samples]
+TPM_MAG_resolved_wide_metaT_NMDS_moisture=t(TPM_MAG_resolved_wide_metaT_NMDS_moisture) #transpose so anosim doesn't yell
+TPM_MAG_resolved_wide_metaT_NMDS_moisture_bi=t(TPM_MAG_resolved_wide_metaT_NMDS_moisture_bi) #transpose so anosim doesn't yell
+TPM_MAG_resolved_wide_metaT_NMDS_structure=t(TPM_MAG_resolved_wide_metaT_NMDS_structure) #transpose so anosim doesn't yell
+
+#We also need to subset the metadata so that they match appropriately.
+metadat_moisture=metadat[metadat$samplename %in% moisture_samples, ]
+metadat_moisture_bi=metadat[metadat$samplename %in% moisture_samples_bi, ]
+metadat_structure=metadat[metadat$samplename %in% structure_samples, ]
+
+#calculate distance and perform anosim
+Ord_dist_moisture_bi=metaMDSdist(TPM_MAG_resolved_wide_metaT_NMDS_moisture_bi, distance = "bray", noshare = 0.1, trace = 1, autotransform=T) 
+Ord_dist_structure=metaMDSdist(TPM_MAG_resolved_wide_metaT_NMDS_structure, distance = "bray", noshare = 0.1, trace = 1, autotransform=T) 
+
+# PERMANOVA to confirm above.
+dm.mags_moisture_bi=calc_dm(t(TPM_MAG_resolved_wide_metaT_NMDS_moisture_bi), method = "bray")
+adonis2(formula = dm.mags_moisture_bi ~ moisture, data = metadat_moisture_bi, permutations = 900)
+dm.mags_structure = calc_dm(t(TPM_MAG_resolved_wide_metaT_NMDS_structure), method = "bray")
+adonis2(formula = dm.mags_structure ~ glassbeads, data = metadat_structure, permutations = 900)
+dm.mags_moisture=calc_dm(t(TPM_MAG_resolved_wide_metaT_NMDS_moisture), method = "bray")
+adonis2(formula = dm.mags_moisture ~ moisture, data = metadat_moisture, permutations = 900)
+
+#Let's do some NMDS
+#Full dataset, no subsets first just to see.
+Ord_full=metaMDS(t(TPM_MAG_resolved_wide_metaT_NMDS), distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for all no subsets.
+stressplot(Ord_full) #looks good.
+data.scores_full = as.data.frame(vegan::scores(Ord_full)$sites)
+data.scores_full$moisture = metadat$moisture
+data.scores_full$moisture[data.scores_full$moisture==0.2]="A 20% w Structure"
+data.scores_full$moisture[data.scores_full$moisture==0.1]="B 10% w Structure"
+data.scores_full$moisture[data.scores_full$moisture==0.05]="C 5% w Structure"
+data.scores_full$moisture[data.scores_full$moisture==1.0]="D 100% no Structure"
+data.scores_full$structure = metadat$glassbeads
+
+data.scores_full %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = moisture), size = 3, shape = 21) + 
+  new_scale_color()+
+  stat_ellipse(aes(fill = moisture, color = moisture), alpha = 0.2, geom = "polygon", type="t") +
+  theme_bw()  +
+  scale_color_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  scale_fill_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  labs(title="No subset, genome-level NMDS by moisture (metaT)")
+
+data.scores_full %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = structure), size = 3, shape = 21) + 
+  new_scale_color()+
+  stat_ellipse(aes(fill = structure, color = structure), alpha = 0.2, geom = "polygon", type="t") +
+  theme_bw()  +
+  scale_color_manual(values=wes_palette("Royal1")) +
+  scale_fill_manual(values=wes_palette("Royal1")) +
+  labs(title="No subset, genome-level NMDS by structure (metaT)")
+
+#The structure plot is pretty cool - Even across ALL treatments and everything we're seeing, structure is still a huge driver of the overall communities.
+
+#Now individual NMDS plots with subsets
+#moisture
+Ord_moisture=metaMDS(TPM_MAG_resolved_wide_metaT_NMDS_moisture, distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for moisture
+stressplot(Ord_moisture) #looks good.
+data.scores_moisture = as.data.frame(vegan::scores(Ord_moisture)$sites)
+data.scores_moisture$moisture = metadat_moisture$moisture
+data.scores_moisture$moisture[data.scores_moisture$moisture==0.2]="A 20% w Structure"
+data.scores_moisture$moisture[data.scores_moisture$moisture==0.1]="B 10% w Structure"
+data.scores_moisture$moisture[data.scores_moisture$moisture==0.05]="C 5% w Structure"
+NMDS_genome_Moisture = data.scores_moisture %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = moisture), size = 3, shape = 21) + 
+  new_scale_color()+
+  stat_ellipse(aes(fill = moisture, color = moisture), alpha = 0.2, geom = "polygon", type="t") +
+  theme_bw()  +
+  scale_color_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  scale_fill_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  labs(title="Moisture samples subset metaT, genome-level NMDS by moisture")
+#ggsave("genome_NMDS_moisture.pdf", NMDS_genome_Moisture, width = 10, height = 8, units = "in")
+
+##structure
+Ord_structure =metaMDS(TPM_MAG_resolved_wide_metaT_NMDS_structure, distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for structure
+stressplot(Ord_structure) #looks good.
+data.scores_structure = as.data.frame(vegan::scores(Ord_structure)$sites)
+data.scores_structure$structure = metadat_structure$glassbeads
+NMDS_genome_structure = data.scores_structure %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = structure), size = 3, shape = 21) +
+  stat_ellipse(aes(fill = structure, color = structure), alpha = 0.1, geom = "polygon", type="t") +
+  theme_bw() +
+  scale_color_manual(values=wes_palette("Royal1")) +
+  scale_fill_manual(values=wes_palette("Royal1")) +
+  labs(title="Structure samples subset metaT, genome-level NMDS by structure")
+#ggsave("genome_NMDS_structure.pdf", NMDS_genome_structure, width = 10, height = 8, units = "in")
+
+#Now let's plot the metaP in an NMDS. We know that the metaP data is spotty, but I wonder if the big structure patterns are strong enough to tease them apart. Making a metaP metadata file (different input file) and just formatting.
+metadat_metaP = genome_metaP_counts_filtered_norm_long %>% 
+  ungroup() %>%
+  select(sample, everything()) %>%
+  select(-c(2:3))
+
+metadat_metaP = metadat_metaP[!duplicated(metadat_metaP), ]  
+metadat_metaP$glassbeads = ifelse(row.names(metadat_metaP) %in% 1:3, "no", "yes")
+metadat_metaP$moisture <- ifelse(row.names(metadat_metaP) %in% 1:3, "1",
+                            ifelse(row.names(metadat_metaP) %in% 4:8, "0.20",
+                                   ifelse(row.names(metadat_metaP) %in% 9:13, "0.10", "0.05")))
+metadat_metaP$moisture=as.numeric(metadat_metaP$moisture)
+
+metadat_metaP_structure = metadat_metaP[1:8, ]
+metadat_metaP_moisture_bi = metadat_metaP[c(4:8,14:16), ]
+metadat_metaP_moisture = metadat_metaP[c(4:16), ]
+
+genome_metaP_counts_filtered_norm_wide = genome_metaP_counts_filtered_norm_wide %>%
+  column_to_rownames(var="genome_id") #may or may not be necessary i cant remember but it didn't bug out the first time but bugged out the second time idk.
+
+genome_metaP_counts_filtered_norm_wide_structure = genome_metaP_counts_filtered_norm_wide %>%
+  data.frame() %>%
+  select(-c(9:16))
+
+genome_metaP_counts_filtered_norm_wide_moisture_bi = genome_metaP_counts_filtered_norm_wide %>%
+    data.frame() %>%
+  select(-c(1:3, 9:13))
+
+genome_metaP_counts_filtered_norm_wide_moisture = genome_metaP_counts_filtered_norm_wide %>%
+    data.frame() %>%
+  select(-c(1:3))
+
+#No subsets first: structure and moisture
+Ord_structure_metaP = metaMDS(t(genome_metaP_counts_filtered_norm_wide), distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for structure
+stressplot(Ord_structure) #looks good.
+data.scores_structure_metaP = as.data.frame(vegan::scores(Ord_structure_metaP)$sites)
+data.scores_structure_metaP$structure = metadat_metaP$glassbeads
+nmds_metaP_nosubset_structure=data.scores_structure_metaP %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = structure), size = 3, shape = 21) +
+  stat_ellipse(aes(fill = structure, color = structure), alpha = 0.1, geom = "polygon", type="t") +
+  theme_bw() +
+  scale_color_manual(values=wes_palette("Royal1")) +
+  scale_fill_manual(values=wes_palette("Royal1")) +
+  labs(title="No subsets metaP, genome-level NMDS by structure")
+#ggsave("genome_NMDS_noSubset_metaP.pdf", nmds_metaP_nosubset_structure, width = 10, height = 8, units = "in")
+
+Ord_moisture_metaP = metaMDS(t(genome_metaP_counts_filtered_norm_wide), distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for moisture
+stressplot(Ord_moisture_metaP) #looks good.
+data.scores_moisture_metaP = as.data.frame(vegan::scores(Ord_moisture_metaP)$sites)
+data.scores_moisture_metaP$moisture = metadat_metaP$moisture
+nmds_metaP_nosubset_moisture = data.scores_moisture_metaP %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = moisture), size = 3, shape = 21) +
+  stat_ellipse(aes(fill = moisture, color = moisture), alpha = 0.1, geom = "polygon", type="t") +
+  theme_bw() +
+  scale_color_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  scale_fill_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  labs(title="No subsets metaP, genome-level NMDS by moisture")
+#ggsave("genome_NMDS_noSubset_metaP_moisture.pdf", nmds_metaP_nosubset_moisture, width = 10, height = 8, units = "in")
+
+###
+###
+###
+#Now subsets: structure and moisture_bi
+###
+###
+###
+
+Ord_structure_subset_metaP = metaMDS(t(genome_metaP_counts_filtered_norm_wide_structure), distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for structure_subset
+stressplot(Ord_structure_subset_metaP) #looks good.
+data.scores_structure_subset_metaP = as.data.frame(vegan::scores(Ord_structure_subset_metaP)$sites)
+data.scores_structure_subset_metaP$structure_subset = metadat_metaP_structure$glassbeads
+nmds_metaP_subset_structure_subset=data.scores_structure_subset_metaP %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = structure_subset), size = 3, shape = 21) +
+  stat_ellipse(aes(fill = structure_subset, color = structure_subset), alpha = 0.1, geom = "polygon", type="t") +
+  theme_bw() +
+  scale_color_manual(values=wes_palette("Royal1")) +
+  scale_fill_manual(values=wes_palette("Royal1")) +
+  labs(title="Structure subsets metaP, genome-level NMDS")
+#ggsave("genome_NMDS_subset_structure_metaP.pdf", nmds_metaP_nosubset_structure_subset, width = 10, height = 8, units = "in")
+
+Ord_moisture_subset_metaP = metaMDS(t(genome_metaP_counts_filtered_norm_wide_moisture), distance = "bray", noshare = 0.1, trace = 1, autotransform=T) #make distance matrix for moisture_subset
+stressplot(Ord_moisture_subset_metaP) #looks good.
+data.scores_moisture_subset_metaP = as.data.frame(vegan::scores(Ord_moisture_subset_metaP)$sites)
+data.scores_moisture_subset_metaP$moisture_subset = metadat_metaP_moisture$moisture
+data.scores_moisture_subset_metaP$moisture_subset=as.numeric(data.scores_moisture_subset_metaP$moisture_subset)
+data.scores_moisture_subset_metaP$moisture_subset[data.scores_moisture_subset_metaP$moisture_subset==0.20]="A 20% w Structure"
+data.scores_moisture_subset_metaP$moisture_subset[data.scores_moisture_subset_metaP$moisture_subset==0.10]="B 10% w Structure"
+data.scores_moisture_subset_metaP$moisture_subset[data.scores_moisture_subset_metaP$moisture_subset==0.05]="C 5% w Structure"
+nmds_metaP_moisture_subset=data.scores_moisture_subset_metaP %>%
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  geom_point(aes(fill = moisture_subset), size = 3, shape = 21) +
+  stat_ellipse(aes(fill = moisture_subset, color = moisture_subset), alpha = 0.1, geom = "polygon", type="t") +
+  theme_bw() +
+  scale_color_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  scale_fill_manual(values=c("#dd8d29","#e2d200","#46acc8","#74d18e")) +
+  labs(title="moisture subsets metaP, genome-level NMDS")
+#ggsave("genome_NMDS_subset_moisture_metaP.pdf", nmds_metaP_nosubset_moisture_subset, width = 10, height = 8, units = "in")
+
+combined_plots = NMDS_genome_structure + NMDS_genome_Moisture + nmds_metaP_subset_structure_subset + nmds_metaP_moisture_subset
+#ggsave("genome_NMDS_combined_metaG_and_metaP_v2.pdf", combined_plots, width = 15, height = 10, units = "in")
+combined_plots
+
+
+# PERMANOVA to confirm above.
+dm.mags_metaP_moisture=calc_dm(genome_metaP_counts_filtered_norm_wide_moisture, method = "bray")
+adonis2(formula = dm.mags_metaP_moisture ~ moisture, data = metadat_metaP_moisture, permutations = 900)
+dm.mags_metaP_structure = calc_dm(genome_metaP_counts_filtered_norm_wide_structure, method = "bray")
+adonis2(formula = dm.mags_metaP_structure ~ glassbeads, data = metadat_metaP_structure, permutations = 900)
+
+#write out the files that we will want to keep out of this. Clean the env.
+variables_to_keep = c("tpm_metaG", "TPM_gene_resolved_wide_metaT", "TPM_gene_resolved_long_metaT", "normalized_TPM_to_genome_expression_long", "gene_metaP_counts_filtered_norm", "normalized_TPM_to_genome_expression_wide", "TPM_MAG_resolved_long_metaT", "TPM_MAG_resolved_wide_metaT", "metadat", "taxonomy", "filtered_counts_clean_metaT", "genome_metaP_counts_filtered_norm_long", "genome_metaP_counts_filtered_norm_wide","metadat_moisture", "metadat_structure", "metadat_moisture_bi", "moisture_samples", "moisture_samples_bi", "structure_samples")
+
+rm(list=setdiff(ls(), variables_to_keep)) #clean out the environment.
+```
+
+#Heatmaps and other visualizations
+
+```{r Fuctional heatmaps}
+#Going to make a functional heatmap based off of the DRAM annotation product. I modified slightly to clean up the metabolisms, I also manually fixed the chitin degradation calls as DRAM over-calls those. I am only calling a chitin degrader if it has, specifically, GH18 and GH19 + 2 other chitin degradation involved genes by DRAM (i.e., GH18, GH19, GH23, GH73, CE4, GH20 GH84), or encodes/expresses at least 4/5 other GHs involved in the process as called by DRAM (i.e., GH23, GH73, CE4, GH20, GH84). There are other genes, but so much noise that this was a good number / cutoff because everything that was experimentally verified previously was correct. For ectoine biosynthesis and degrdation, I required there to be a ectoine-specific gene (i.e., ectoine hydrolase, ectoine synthase). The rest were the raw DRAM product calls.
+
+#Supplementary_Table_X_Fig3.xlsx table A
+product_matrix_potential=read.delim("product_modified_potential.tsv", header=T, sep = "\t") #read in taxonomy.
+
+#remove the excess info for a sec. I'll put this back later.
+product_matrix_potential_wide=product_matrix_potential[,-c(2:3)]
+#Now convert this matrix into long format for ggplot2
+product_matrix_potential_long = product_matrix_potential_wide %>%
+  pivot_longer(cols = -genome, names_to = "metabolism", values_to = "value") %>%
+  left_join(product_matrix_potential, by = "genome") %>%
+  mutate(taxonomy = sub(".*g__", "g__", taxonomy)) %>%
+  mutate(taxonomy = sub(";s__*", "", taxonomy)) %>%
+  select(-c(6:57))
+
+#making a color palette because that default was very hard to look at.
+mcolors=c("#8b6220", "#8b6a52", "#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#156ae5", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#ff9c62", "#c5c5c5", "#104a62", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#eee652", "#de9400")
+
+
+potential_dotplot = product_matrix_potential_long %>%
+  mutate(value = ifelse(value == 0, NA, value)) %>%
+  ggplot(aes(x=fct_reorder(genome,tax.index, .desc = TRUE), y = metabolism, size = value)) + 
+  geom_point(shape=1,aes(colour=factor(taxonomy))) + 
+  scale_colour_manual(values=mcolors) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=1))+
+  scale_y_discrete(limits=rev) +
+  scale_size_continuous(breaks = c(0, 1))
+potential_dotplot
+#ggsave("Product_Metabolic-Heatmap_29MAGs_dotplot_potential.pdf", potential_dotplot, width = 25, height = 12, units = "in")
+  
+# Supplementary_Table_X_Fig3.xlsx table B
+#Now going to make one that has the expression. I'm just going to overlay them outside of R.
+product_expressed_matrix=read.delim("product_expressed_metaT.tsv", header=T, sep = "\t") #read in taxonomy.
+
+#remove the excess info for a sec. I'll put this back later.
+product_expressed_matrix_wide=product_expressed_matrix[,-c(2:3)]
+#Now convert this matrix into long format for ggplot2
+product_expressed_matrix_long = product_expressed_matrix_wide %>%
+  pivot_longer(cols = -genome, names_to = "metabolism", values_to = "value") %>%
+  left_join(product_expressed_matrix, by = "genome") %>%
+  mutate(taxonomy = sub(".*g__", "g__", taxonomy)) %>%
+  mutate(taxonomy = sub(";s__*", "", taxonomy)) %>%
+  select(-c(6:57))
+
+expressed_dotplot = product_expressed_matrix_long %>%
+  mutate(value = ifelse(value == 0, NA, value)) %>%
+  ggplot(aes(x=fct_reorder(genome,tax.index, .desc = TRUE), y = metabolism, size = value)) + 
+  geom_point(aes(colour=factor(taxonomy))) + 
+  scale_colour_manual(values=mcolors) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=1))+
+  scale_y_discrete(limits=rev) +
+  scale_size_continuous(breaks = c(0, 1))
+expressed_dotplot
+ #ggsave("Product_Metabolic-Heatmap_29MAGs_dotplot_expressed.pdf", expressed_dotplot, width = 25, height = 12, units = "in")
+
+#Supplementary_Table_X_Fig3.xlsx table C
+#Now going to make a third one that has the metaP data and overlay it on top.
+product_expressed_metaP_matrix=read.delim("product_expressed_metaP.tsv", header=T, sep = "\t") #read in taxonomy.
+
+#remove the excess info for a sec. I'll put this back later.
+product_expressed_metaP_matrix_wide=product_expressed_metaP_matrix[,-c(2:3)]
+#Now convert this matrix into long format for ggplot2
+product_expressed_metaP_matrix_long = product_expressed_metaP_matrix_wide %>%
+  pivot_longer(cols = -genome, names_to = "metabolism", values_to = "value") %>%
+  left_join(product_expressed_metaP_matrix, by = "genome") %>%
+  mutate(taxonomy = sub(".*g__", "g__", taxonomy)) %>%
+  mutate(taxonomy = sub(";s__*", "", taxonomy)) %>%
+  select(-c(6:57))
+
+expressed_dotplot_metaP = product_expressed_metaP_matrix_long %>%
+  mutate(value = ifelse(value == 0, NA, value)) %>%
+  ggplot(aes(x=fct_reorder(genome,tax.index, .desc = TRUE), y = metabolism, size = value)) + 
+  geom_point(shape=12,aes(colour=factor(taxonomy))) + 
+  scale_colour_manual(values=mcolors) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1, size=1))+
+  scale_y_discrete(limits=rev)
+expressed_dotplot_metaP
+#ggsave("Product_Metabolic-Heatmap_29MAGs_dotplot_expressed_metaP_v2.pdf", expressed_dotplot_metaP, width = 25, height = 12, units = "in")
+
+#Now I'm going to build on these annotations to encompass more things. In other words, break down the DRAM product to each of the genes that contribute and then do some NMDS and/or merge the annotations into my DESEQ2 analyses.
+
+library(readxl)
+#thanks chatGPT for helping me loop this across sheets lol.
+
+#Supplementary_Table_XX_DRAM
+# Specify the file path
+file_path = "metabolism_summary.xlsx"
+
+# Specify the sheet names
+sheet_names = c("MISC", "carbon utilization", "Transporters", "Energy", "Organic Nitrogen", "carbon utilization (Woodcroft)")
+
+# Initialize an empty list to store the data frames
+sheet_matrices = list()
+
+# Loop over each sheet in the Excel file
+for (sheet_name in sheet_names) {
+  # Read data from the current sheet
+  sheet_matrix = read_excel(file_path, sheet = sheet_name, col_names = TRUE)
+
+  sheet_matrix_long = sheet_matrix %>%
+    pivot_longer(cols = 6:34, names_to = "genome_id", values_to = "value") %>% #pivot longer #1. Change this to however many columns you have. I had 34. 5 from DRAM that had the default DRAM info folowed by 29 columns for my MAGs.
+    as.data.frame() %>% #make df
+    separate(value, into = paste0("gene_", 1:100), sep = ",") #now comma separate those cells that contain each of the genes present in a pathway.
+
+columns_to_remove = sapply(sheet_matrix_long[, 7:ncol(sheet_matrix_long)], function(x) all(is.na(x))) #set list of columns that are just full "NA" across the board (i.e., just genes that were not present at all in any genome)
+sheet_matrix_long = sheet_matrix_long[, c(1:6, which(!columns_to_remove) + 6)] # Keep columns 1-6 and those with non-"NA" values.
+    
+  sheet_matrix_long = sheet_matrix_long %>%
+    pivot_longer(cols = 7:ncol(sheet_matrix_long), names_to = "gene", values_to = "gene_name") %>%
+    filter(!is.na(gene_name)) #make this into a long format and then filter out any "gene_name" that is an NA because it didn't have any annotation.
+
+  # Append the processed data frame to the list
+  sheet_matrices[[sheet_name]] = sheet_matrix_long
+}
+
+final_sheet_matrix = do.call(rbind, sheet_matrices) # Combine all data frames into a single data frame
+#write.csv(final_sheet_matrix, file="final_sheet_matrix_out.csv")
+final_sheet_matrix$gene_id_split = str_split(final_sheet_matrix$gene_name, "_renamed_", simplify = TRUE)[, 2] #split up the gene_name right after "renamed" go split the "genome" id and the actual gene_id.
+TPM_gene_resolved_wide_metaT_split=TPM_gene_resolved_wide_metaT
+TPM_gene_resolved_wide_metaT_split$gene_id_split <- str_split(TPM_gene_resolved_wide_metaT_split$gene_id, "_50-10_", simplify = TRUE)[, 2] #go back to the tpm-mod file and just fix those ids as well to match the ones from final_sheet_matrix.
+
+joined_DRAM_sheet_and_expression=final_sheet_matrix %>%
+  left_join(TPM_gene_resolved_wide_metaT_split, by=c("gene_id_split"="gene_id_split")) %>% #left join.
+  sapply(function(x) replace(x, is.na(x), 0)) %>% #make the NA's be 0 since they are missing because they are not in the TPM meaning they either did not recruit reads or did not meet the min cutoffs.
+  as.data.frame() %>% #make whole df
+  mutate(across(11:30, function(x) as.numeric(x))) %>% #make numeric so i can sum
+   mutate(sums = rowSums(.[, 11:30]),
+          structuresums = rowSums(.[, 11:20]),
+          moisturesums = rowSums(.[, 16:30])) %>%
+  select(-c(11:30))
+
+normalized_TPM_to_genome_expression_wide_split=normalized_TPM_to_genome_expression_wide
+normalized_TPM_to_genome_expression_wide_split$gene_id_split = str_split(normalized_TPM_to_genome_expression_wide_split$gene_id, "_50-10_", simplify = TRUE)[, 2] #go back to the tpm-mod file and just fix those ids as well to match the ones from final_sheet_matrix.
+
+joined_DRAM_sheet_and_expression = joined_DRAM_sheet_and_expression %>%
+  left_join(normalized_TPM_to_genome_expression_wide_split, by=c("gene_id_split"="gene_id_split")) %>% #left join the genome resolved abunds.
+  sapply(function(x) replace(x, is.na(x), 0)) %>% #make the NA's be 0 since they are missing because they are not in the TPM meaning they either did not recruit reads or did not meet the min cutoffs.
+  as.data.frame() %>% #make whole df
+  mutate(across(15:34, function(x) as.numeric(x))) %>% #make numeric so i can sum
+     mutate(genomesumstotal = rowSums(.[, 15:34]),
+          genomestructuresums = rowSums(.[, 15:24]),
+          genomemoisturesums = rowSums(.[, 20:34])) %>%
+  select(-c(14:34))#left join to normalized expression per gene.
+#write.csv(joined_DRAM_sheet_and_expression, file="full_metabolism_matrix.csv")
+
+joined_DRAM_sheet_and_expression_core=joined_DRAM_sheet_and_expression %>%
+  mutate(DRAM_category_v1=ifelse(subheader != 0, subheader,
+                                 ifelse(header != 0, header,
+                                        ifelse(module != 0, module, NA)))) %>%
+  select(genome_id, DRAM_category_v1, everything()) %>%
+  select(-gene_id.x, -gene_description, -module, -gene, -gene_id_split,-header,-subheader) %>%
+  group_by(genome_id, DRAM_category_v1) %>%
+  summarize(
+    abundance_total = sum(as.numeric(sums)),
+    abundance_structure = sum(as.numeric(structuresums)),
+    abundance_moisture = sum(as.numeric(moisturesums)),
+    abundance_genome = sum(as.numeric(genomesumstotal)),
+    abundance_genome_structure = sum(as.numeric(genomestructuresums)),
+    abundance_genome_moisture = sum(as.numeric(genomemoisturesums)))
+
+variables_to_keep = c("final_sheet_matrix","TPM_gene_resolved_wide_metaT", "TPM_gene_resolved_long_metaT","normalized_TPM_to_genome_expression_long", "normalized_TPM_to_genome_expression_wide", "gene_metaP_counts_filtered_norm", "TPM_MAG_resolved_long_metaT", "TPM_MAG_resolved_wide_metaT", "metadat", "taxonomy", "filtered_counts_clean_metaT", "metadat_moisture", "metadat_timepoint", "metadat_structure", "metadat_moisture_bi", "moisture_samples", "moisture_samples_bi", "structure_samples", "timepoint_samples", "joined_DRAM_sheet_and_expression", "joined_DRAM_sheet_and_expression_core", "mcolors")
+rm(list=setdiff(ls(), variables_to_keep)) #clean out the environment.
+
+```
+
+#Differential expression analyses with DESeq2
+```{r DESEQ2}
+### Now I want to run the above stats again but using the sample subsets.
+joined_DRAM_sheet_and_expression_core_totalSum = joined_DRAM_sheet_and_expression_core %>%
+  select(-c(4:8)) #make df only with total sum TPM pathways
+
+joined_DRAM_sheet_and_expression_core_genomeNorm = joined_DRAM_sheet_and_expression_core %>%
+  select(-c(3:5, 7:8)) #make df with only genome normalized sum TPM pathways
+
+DRAM_aggregated_pathway_totalSum_wide = joined_DRAM_sheet_and_expression_core_totalSum %>%
+  pivot_wider(names_from=genome_id, values_from=abundance_total,values_fill = 0) %>%
+  column_to_rownames(var="DRAM_category_v1") %>%
+  t() #pivot wide and format for NMDS.
+
+DRAM_aggregated_pathway_genomeNorm_wide = joined_DRAM_sheet_and_expression_core_genomeNorm %>%
+  pivot_wider(names_from=genome_id, values_from=abundance_genome,values_fill = 0) %>%
+  column_to_rownames(var="DRAM_category_v1") %>%
+  t() #pivot wide and format for NMDS.
+
+joined_DRAM_sheet_and_expression_core_totalSumStructure = joined_DRAM_sheet_and_expression_core %>%
+  select(-c(3, 5:8)) #make df only with structure sum TPM pathways
+
+DRAM_aggregated_pathway_totalSumStructure = joined_DRAM_sheet_and_expression_core_totalSumStructure %>%
+  pivot_wider(names_from=genome_id, values_from=abundance_structure,values_fill = 0) %>%
+  column_to_rownames(var="DRAM_category_v1") %>%
+  t() #pivot wide and format for NMDS.
+
+##################### Now make subsets.
+
+filtered_counts_clean_metaT_moisture_bi = filtered_counts_clean_metaT[, moisture_samples_bi] #subset the tpm to the moisture bi treatments
+filtered_counts_clean_metaT_structure = filtered_counts_clean_metaT[, structure_samples] #subset the tpm to the moisture treatments
+
+dds_subset_structure=DESeqDataSetFromMatrix(countData=filtered_counts_clean_metaT_structure,
+                           colData=metadat_structure,
+                           design=~glassbeads)
+
+dds_subset_structure$condition = factor(dds_subset_structure$glassbeads, levels = c("no structure","structure"))
+dds_subset_structure=DESeq(dds_subset_structure)
+res_structure=results(dds_subset_structure)
+res_structure
+resultsNames(dds_subset_structure)
+
+resOrdered_structure = res_structure[order(res_structure$pvalue),]
+summary(res_structure)
+sum(res_structure$padj < 0.05, na.rm=TRUE)
+res05_structure = results(dds_subset_structure, alpha=0.05)
+summary(res05_structure)
+sum(res05_structure$padj < 0.05, na.rm=TRUE) #count how many genes are significantly differentially expressed.
+
+plotMA(res05_structure, ylim=c(-2,2))
+
+resNorm_structure = lfcShrink(dds_subset_structure, coef=2, type="normal")
+resAsh_structure = lfcShrink(dds_subset_structure, coef=2, type="ashr")
+
+par(mfrow=c(1,2), mar=c(4,4,2,1))
+xlim = c(1,1e5); ylim = c(-3,3)
+plotMA(resNorm_structure, xlim=xlim, ylim=ylim, main="normal")
+plotMA(resAsh_structure, xlim=xlim, ylim=ylim, main="ashr")
+
+structure_DEGs=as.data.frame(resOrdered_structure)
+structure_DEGs_sig <- structure_DEGs %>% 
+  filter(padj <= 0.05)
+
+#write.csv(structure_DEGs_sig, file="condition_structure_subset_results_raw_filtered.csv")
+
+#Now i'm going to catalogue all of those DEGs that I can by DRAM annotations. Going to bring in  joined_DRAM_sheet_and_expression from above and process.
+structure_DEGs_sig_df=rownames_to_column(structure_DEGs_sig, var="gene_id")
+structure_DEGs_sig_df$gene_id_split = str_split(structure_DEGs_sig_df$gene_id, "_50-10_", simplify = TRUE)[, 2] #go back to the tpm-mod file and just fix those ids as well to match the ones from final_sheet_matrix.
+
+structure_DEGs_sig_df_merged=structure_DEGs_sig_df %>%
+  left_join(joined_DRAM_sheet_and_expression, by="gene_id_split")
+
+#Keep in mind, there will be a whole lotta NAs here just because not everything that is a DEG has a full functional annotation with categorization by DRAM that shows up in the metabolism_summary sheet. That being said, this worked. Let's clean this up a bit. I will only write out those that we can actually annotate using the DRAM metabolism summary sheet.
+
+structure_DEGs_sig_df_merged=structure_DEGs_sig_df_merged %>%
+  filter(!is.na(gene_description)) %>%
+  select(-c(15:17)) %>%
+  mutate(DRAM_category_v1=ifelse(subheader != 0, subheader,
+                                 ifelse(header != 0, header,
+                                        ifelse(module != 0, module, NA)))) %>%
+  select(-c(11:13))
+print(sapply(structure_DEGs_sig_df_merged, function(x) length(unique(x))))
+
+#write.csv(structure_DEGs_sig_df_merged, file = "structure_annotated_DEGs.csv")
+
+#I wrote out the file above and modified it to clean up the categories a little. I removed "ribosomal genes", "hypothetical genes", and "information system" genes. I aggregated the transporter genes.
+
+#Reading modified file back in.
+
+#Supplementary_Table_XXX_DESEQ.xlsx table B
+structure_DEGs_sig_df_merged = read.csv("structure_annotated_DEGS_modified_noInf.csv", header=T, row.names=1)
+
+#Ok, so now I noticed that some of these genes were duplicated because they show up in multiple metabolisms, and because they were consolidated at a higher level. I'm going to simplify these down here.
+
+structure_DEGs_sig_df_merged_noDupe <- structure_DEGs_sig_df_merged %>% 
+  select(-c(DRAM_category_v1)) %>% #lets remove this column to make the vals better.
+  distinct() %>% #At this point, we will only have gene_ids that are in there twice because they were annotated by DRAM as being in >1 module / pathway.
+  group_by(gene_id) %>%
+  summarise( #going to write out all of the columns that i want to retain from the original df. surely there's an easier way to do this but whatever. The values are identical, so just take the first.
+    baseMean = dplyr::first(baseMean),
+    log2FoldChange = dplyr::first(log2FoldChange),
+    lfcSE = dplyr::first(lfcSE),
+    stat = dplyr::first(stat),
+    pvalue = dplyr::first(pvalue),
+    padj = dplyr::first(padj),
+    genome_id = dplyr::first(genome_id),
+    sums = dplyr::first(sums),
+    structuresums = dplyr::first(structuresums),
+    moisturesums = dplyr::first(moisturesums),
+    genomesumstotal = dplyr::first(genomesumstotal),
+    genomestructuresums = dplyr::first(genomestructuresums),
+    genomemoisturesums = dplyr::first(genomemoisturesums),
+    gene_id.x_v2 = paste(unique(gene_id.x), collapse=","),
+    gene_description_v2 = paste(unique(gene_description), collapse = ", "),
+    DRAM_category_v3 = paste(unique(DRAM_category_v2), collapse = ", ")
+  ) #badabingbadaboom
+
+structure_DEGs_sig_df_merged_wTax = structure_DEGs_sig_df_merged_noDupe %>%
+  left_join(taxonomy, by=c("genome_id"="user_genome")) %>%
+  select(-c(19:36))
+
+structure_DEGs_sig_df_merged_wTax$gtdb=sub(".*g__", "g__", structure_DEGs_sig_df_merged_wTax$classification)
+structure_DEGs_sig_df_merged_wTax$fold_change_direction = ifelse(structure_DEGs_sig_df_merged_wTax$log2FoldChange > 0, "Positive", "Negative")
+
+#Some of the original bugs don't have DEGs so modifying the colors to reflect. Removing colors for: Hydrogenophaga, MESE01
+mcolors2=c("#8b6220", "#8b6a52", "#4f3200", "#c767ff", "#ffeea4", "#ffcdbd", "#156ae5", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#ff9c62", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#eee652", "#de9400")
+
+# Plot the dotplot with the new grouping variable
+dotplot_structure_DEGs_ordered = structure_DEGs_sig_df_merged_wTax %>%
+  ggplot(aes(x = gene_id, y = DRAM_category_v3, size = abs(log2FoldChange), color = factor(gtdb))) + 
+  geom_point() + 
+  scale_color_manual(values = mcolors2) +
+  scale_y_discrete(limits = rev) +
+  facet_wrap(fold_change_direction ~ gtdb) + # Add this line to facet by taxonomy.
+  theme_bw() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank())
+
+#ggsave("Structure_DEGs_dots_ordered_abs_new.pdf", dotplot_structure_DEGs_ordered, width = 50, height = 30, units = "in", limitsize = F)
+
+#ok hella - that looks pretty ok for a SOM figure. But I have a better idea. Lets do a plot that has base mean on y axis and then log fold change on x axis. Then lets color each dot and put the taxonomic information as well as some of the gene annotation information.
+
+#Lets get ids for top 10
+# Select the top 10 genes based on log2foldchange
+top_genes_log2foldchange = structure_DEGs_sig_df_merged_wTax %>%
+  group_by(fold_change_direction) %>%
+  top_n(10, wt = abs(log2FoldChange)) %>%
+  ungroup()
+
+# Select the top 10 genes based on baseMean
+top_genes_baseMean = structure_DEGs_sig_df_merged_wTax %>%
+  group_by(fold_change_direction) %>%
+  top_n(10, wt = baseMean) %>%
+  ungroup()
+
+chitinases_structure = structure_DEGs_sig_df_merged_wTax[structure_DEGs_sig_df_merged_wTax$gene_id.x_v2 %in% c("GH18", "GH19"), ]
+
+# Combine the top genes from both log2foldchange and baseMean
+top_genes_new = bind_rows(top_genes_log2foldchange, top_genes_baseMean, chitinases_structure)
+top_genes_new = top_genes_new %>% 
+  distinct(gene_id, .keep_all = TRUE)
+
+mcolors3=c("#8b6220", "#8b6a52", "#4f3200", "#c767ff", "#c5ac73", "#ffcdbd", "#156ae5", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#ff9c62", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#eee652", "#de9400")
+
+dotplot_fig = ggplot(structure_DEGs_sig_df_merged_wTax, aes(x = log2FoldChange, y = baseMean, color = gtdb, shape = fold_change_direction)) +
+  geom_point(size=3) +
+  geom_text_repel(
+    data = top_genes_new, aes(label = paste(gene_id.x_v2, DRAM_category_v3, sep = ": ")), position = position_dodge(5), box.padding = 0, force = 1, segment.size = 0.5, segment.color = "black", size = 6, max.overlaps = 30
+    ) +
+  facet_wrap(~fold_change_direction, scales = 'free') +
+  theme_minimal() +
+  scale_color_manual(values = mcolors3) +
+  labs(x = 'Log2 Fold Change', y = 'Base Mean', color = 'GTDB Taxonomy', shape = 'Fold change direction') +
+  ggtitle('Log2 Fold Change for Genes in Each Taxonomy')
+#ggsave("Structure_DEGs.pdf", dotplot_fig, width = 20, height = 9, units = "in", limitsize = F)
+
+#Beautiful.
+
+#Now just want some simple pie charts.
+taxonomy_counts <- structure_DEGs_sig_df_merged_wTax %>%
+  group_by(gtdb, fold_change_direction) %>%
+  summarise(Count = n())
+
+mcolors4=c("#8b6220", "#8b6a52", "#c767ff", "#c5ac73", "#ffcdbd", "#156ae5", "#628b29","#254c00", "#b4cd6a", "#bd4141", "#ff9c62", "#419cbd", "#83deff",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#eee652", "#de9400")
+
+# Create separate pie charts for negative and positive fold change directions
+pie_chart_negative <- ggplot(subset(taxonomy_counts, fold_change_direction == "Negative"), aes(x = "", y = Count, fill = gtdb)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar("y") +
+  theme_void() +
+  scale_fill_manual(values = mcolors4) +  # Use your desired color palette
+  ggtitle("Negative Fold Change")
+
+#ggsave("neg_pie_chart.pdf", pie_chart_negative, width = 20, height = 9, units = "in", limitsize = F)
+
+mcolors5=c("#4f3200", "#c767ff", "#c5ac73", "#254c00", "#b4cd6a", "#e66294", "#ff9c62", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94")
+
+pie_chart_positive = ggplot(subset(taxonomy_counts, fold_change_direction == "Positive"), aes(x = "", y = Count, fill = gtdb)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar("y") +
+  theme_void() +
+  scale_fill_manual(values = mcolors5) +  # Use your desired color palette
+  ggtitle("Positive Fold Change")
+
+#ggsave("pos_pie_chart.pdf", pie_chart_positive, width = 20, height = 9, units = "in", limitsize = F)
+
+#bertiful. i'll merge those later in illustrator because lazy.
+
+#I'm just going to make a bar chart here with different categories for a supplemental maybe? May not make it through but i want to write about it.
+
+# Calculate count of unique genes for each category
+gene_counts_structure <- structure_DEGs_sig_df_merged_wTax %>%
+  group_by(DRAM_category_v3) %>%
+  summarise(unique_genes = n_distinct(gene_id)) %>%
+  arrange(desc(unique_genes))  # Arrange in decreasing order of gene count
+
+# Convert DRAM_category_v3 to factor and reorder it based on the count of unique genes
+gene_counts_structure$DRAM_category_v3 <- factor(gene_counts_structure$DRAM_category_v3, levels = gene_counts_structure$DRAM_category_v3[order(gene_counts_structure$unique_genes)])
+
+# Plotting
+structure_DEGS_bars = ggplot(gene_counts_structure, aes(x = reorder(DRAM_category_v3, -gene_counts_structure$unique_genes), y = unique_genes)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Unique Genes Count by DRAM Category",
+       x = "DRAM Category",
+       y = "Unique Genes Count") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 7))
+structure_DEGS_bars
+#ggsave(structure_DEGS_bars, file="deseq2_bars_structure.pdf", width = 10, height = 8)
+
+
+
+###
+################ Now do it for moisture
+###
+
+filtered_counts_clean_metaT_moisture_bi = filtered_counts_clean_metaT %>%
+  select(-c(1:5, 11:15))
+  
+
+dds_subset_moisture=DESeqDataSetFromMatrix(countData=filtered_counts_clean_metaT_moisture_bi,
+                           colData=metadat_moisture_bi,
+                           design=~moisture)
+
+dds_subset_moisture$condition = factor(dds_subset_moisture$moisture, levels = c("moisture","no moisture"))
+dds_subset_moisture=DESeq(dds_subset_moisture)
+res_moisture=results(dds_subset_moisture)
+res_moisture
+resultsNames(dds_subset_moisture)
+
+resOrdered_moisture = res_moisture[order(res_moisture$pvalue),]
+summary(res_moisture)
+sum(res_moisture$padj < 0.05, na.rm=TRUE)
+res05_moisture = results(dds_subset_moisture, alpha=0.05)
+summary(res05_moisture)
+sum(res05_moisture$padj < 0.05, na.rm=TRUE)
+
+plotMA(res05_moisture, ylim=c(-2,2))
+
+resNorm_moisture = lfcShrink(dds_subset_moisture, coef=2, type="normal")
+resAsh_moisture = lfcShrink(dds_subset_moisture, coef=2, type="ashr")
+
+par(mfrow=c(1,2), mar=c(4,4,2,1))
+xlim = c(1,1e5); ylim = c(-3,3)
+plotMA(resNorm_moisture, xlim=xlim, ylim=ylim, main="normal")
+plotMA(resAsh_moisture, xlim=xlim, ylim=ylim, main="ashr")
+
+moisture_DEGs=as.data.frame(resOrdered_moisture)
+moisture_DEGs_sig <- moisture_DEGs %>% 
+  filter(padj <= 0.05)
+
+#write.csv(as.data.frame(moisture_DEGs_sig), file="condition_moisture_subset_results_raw_filtered.csv")
+
+#Now i'm going to catalogue all of those DEGs that I can by DRAM annotations. Going to bring in  joined_DRAM_sheet_and_expression from above and process.
+moisture_DEGs_sig_df=rownames_to_column(moisture_DEGs_sig, var="gene_id")
+moisture_DEGs_sig_df$gene_id_split = str_split(moisture_DEGs_sig_df$gene_id, "_50-10_", simplify = TRUE)[, 2] #go back to the tpm-mod file and just fix those ids as well to match the ones from final_sheet_matrix.
+moisture_DEGs_sig_df_merged=moisture_DEGs_sig_df %>%
+  left_join(joined_DRAM_sheet_and_expression, by="gene_id_split")
+#Keep in mind, there will be a whole lotta NAs here just because not everything that is a DEG has a full functional annotation with categorization by DRAM that shows up in the metabolism_summary sheet. That being said, this worked. Let's clean this up a bit.
+moisture_DEGs_sig_df_merged=moisture_DEGs_sig_df_merged %>%
+  filter(!is.na(gene_description)) %>%
+  select(-c(15:17)) %>%
+  mutate(DRAM_category_v1=ifelse(subheader != 0, subheader,
+                                 ifelse(header != 0, header,
+                                        ifelse(module != 0, module, NA)))) %>%
+  select(-c(11:13))
+
+print(sapply(moisture_DEGs_sig_df_merged, function(x) length(unique(x))))
+
+#write.csv(moisture_DEGs_sig_df_merged, file = "moisture_annotated_DEGs.csv")
+
+#Supplementary_Table_XXX_DESEQ.xlsx table D
+moisture_DEGs_sig_df_merged = read.csv("moisture_annotated_DEGs_noInf.csv", header=T, row.names=1)
+
+#Ok, so now I noticed that some of these genes were duplicated because they show up in multiple metabolisms, and because they were consolidated at a higher level. I'm going to simplify these down here.
+
+moisture_DEGs_sig_df_merged_noDupe <- moisture_DEGs_sig_df_merged %>% 
+  select(-c(DRAM_category_v1)) %>% #lets remove this column to make the vals better.
+  distinct() %>% #At this point, we will only have gene_ids that are in there twice because they were annotated by DRAM as being in >1 module / pathway.
+  group_by(gene_id) %>%
+  summarise( #going to write out all of the columns that i want to retain from the original df. surely there's an easier way to do this but whatever. The values are identical, so just take the first.
+    baseMean = dplyr::first(baseMean),
+    log2FoldChange = dplyr::first(log2FoldChange),
+    lfcSE = dplyr::first(lfcSE),
+    stat = dplyr::first(stat),
+    pvalue = dplyr::first(pvalue),
+    padj = dplyr::first(padj),
+    genome_id = dplyr::first(genome_id),
+    sums = dplyr::first(sums),
+    structuresums = dplyr::first(structuresums),
+    moisturesums = dplyr::first(moisturesums),
+    genomesumstotal = dplyr::first(genomesumstotal),
+    genomestructuresums = dplyr::first(genomestructuresums),
+    genomemoisturesums = dplyr::first(genomemoisturesums),
+    gene_id.x_v2 = paste(unique(gene_id.x), collapse=","),
+    gene_description_v2 = paste(unique(gene_description), collapse = ", "),
+    DRAM_category_v3 = paste(unique(DRAM_category_v2), collapse = ", ")
+  ) #badabingbadaboom
+
+moisture_DEGs_sig_df_merged_wTax = moisture_DEGs_sig_df_merged_noDupe %>%
+  left_join(taxonomy, by=c("genome_id"="user_genome")) %>%
+  select(-c(19:36))
+
+moisture_DEGs_sig_df_merged_wTax$gtdb=sub(".*g__", "g__", moisture_DEGs_sig_df_merged_wTax$classification)
+moisture_DEGs_sig_df_merged_wTax$fold_change_direction = ifelse(moisture_DEGs_sig_df_merged_wTax$log2FoldChange > 0, "Positive", "Negative")
+
+#Some of the original bugs don't have DEGs so modifying the colors to reflect. Removing colors for: Hydrogenophaga, MESE01
+#making a color palette because that default was very hard to look at.
+mcolors6=c("#c767ff", "#c5ac73", "#ffcdbd", "#628b29","#254c00", "#b4cd6a", "#ff9c62", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#de9400")
+
+#Lets get ids for top 10
+# Select the top 10 genes based on log2foldchange
+top_genes_log2foldchange_moisture = moisture_DEGs_sig_df_merged_wTax %>%
+  group_by(fold_change_direction) %>%
+  top_n(10, wt = abs(log2FoldChange)) %>%
+  ungroup()
+
+# Select the top 25 genes based on baseMean
+top_genes_baseMean_moisture = moisture_DEGs_sig_df_merged_wTax %>%
+  group_by(fold_change_direction) %>%
+  top_n(10, wt = baseMean) %>%
+  ungroup()
+
+chitinases_moisture = moisture_DEGs_sig_df_merged_wTax[moisture_DEGs_sig_df_merged_wTax$gene_id.x_v2 %in% c("GH18", "GH19"), ]
+
+# Combine the top genes from both log2foldchange and baseMean
+top_genes_new = bind_rows(top_genes_log2foldchange_moisture, top_genes_baseMean_moisture, chitinases_moisture)
+top_genes_new = top_genes_new %>% 
+  distinct(gene_id, .keep_all = TRUE)
+
+dotplot_fig = ggplot(moisture_DEGs_sig_df_merged_wTax, aes(x = log2FoldChange, y = baseMean, color = gtdb, shape = fold_change_direction)) +
+  geom_point(size=3) +
+  geom_text_repel(
+    data = top_genes_new_moisture, aes(label = paste(gene_id.x_v2, DRAM_category_v3, sep = ": ")), position = position_dodge(5), box.padding = 0, force = 1, segment.size = 0.5, segment.color = "black", size = 3, max.overlaps = 30
+    ) +
+  facet_wrap(~fold_change_direction, scales = 'free') +
+  theme_minimal() +
+  scale_color_manual(values = mcolors6) +
+  labs(x = 'Log2 Fold Change', y = 'Base Mean', color = 'GTDB Taxonomy', shape = 'Fold change direction') +
+  ggtitle('Log2 Fold Change for Genes in Each Taxonomy')
+#ggsave("moisture_DEGs.pdf", dotplot_fig, width = 20, height = 9, units = "in", limitsize = F)
+
+#Now just want some simple pie charts.
+taxonomy_counts <- moisture_DEGs_sig_df_merged_wTax %>%
+  group_by(gtdb, fold_change_direction) %>%
+  summarise(Count = n())
+
+mcolors7=c("#c5ac73", "#b4cd6a","#ff9c62", "#39394a", "#eeca03")
+
+# Create separate pie charts for negative and positive fold change directions
+pie_chart_negative <- ggplot(subset(taxonomy_counts, fold_change_direction == "Negative"), aes(x = "", y = Count, fill = gtdb)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar("y") +
+  theme_void() +
+  scale_fill_manual(values = mcolors7) +  # Use your desired color palette
+  ggtitle("Negative Fold Change")
+
+#ggsave("moisture_neg_pie_chart.pdf", pie_chart_negative, width = 20, height = 9, units = "in", limitsize = F)
+
+mcolors8=c("#c767ff", "#c5ac73", "#ffcdbd", "#628b29","#254c00", "#b4cd6a", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#8b949c", "#737b94", "#eeca03", "#de9400")
+
+pie_chart_positive = ggplot(subset(taxonomy_counts, fold_change_direction == "Positive"), aes(x = "", y = Count, fill = gtdb)) +
+  geom_bar(stat = "identity", width = 1, color = "black") +
+  coord_polar("y") +
+  theme_void() +
+  scale_fill_manual(values = mcolors8) +  # Use your desired color palette
+  ggtitle("Positive Fold Change")
+
+#ggsave("moisture_pos_pie_chart.pdf", pie_chart_positive, width = 20, height = 9, units = "in", limitsize = F)
+
+
+```
+
+#SPLS
+```{r SPLS - genomes to metabolites}
+#This is all looking good, now i think that the last thing that I need to do here is to link the data that Natalie has on the metabolites to something relevant to the microbial community. I will read in all of the metabolites that are significantly different in the structure and moisture treatmets. I'm then going to do an SPLS with each of my genomes and calculate the VIP scores of the top 10 genomes for each significantly related metabolite. Specifically, let's highlight ectoine biosynthesis.
+
+
+##### Load relevant libraries
+source("VIP.R") ## This is a custom script (from the internet) to compute VIPs, has to be in the same directory as this script (or this path has to be changed)
+
+# Supplementary_Table_XXXX_sPLS.xlsx table A
+metabolite=(read.csv("A2.1_all_significant_metabolites.csv",header=T, row.names=1))
+
+metabolite = metabolite %>%
+  as.matrix() %>%
+  t() # force R to see it as a matrix
+dim(metabolite) # this gives the matrix dimension
+
+##### Load OTU data. The only difference between this file and the file used for WGCNA is that i have added in the module colors that resulted from the WGCNA analyses into each gneome. This way I can subset for doing SPLS.
+spls_dataset=TPM_MAG_resolved_wide_metaT %>%
+  column_to_rownames(var="genome_id") %>%
+  as.matrix() %>%
+  t()
+dim(spls_dataset) # this gives the matrix dimension
+
+#Step 2: Predict values
+th_r2<-0.3 # We will only look at the PLS if the correlation is better than 0.3
+for (i in 1:ncol(metabolite)){ # We treat each metabolite independently
+  parameter<-colnames(metabolite)[i]
+  obs_values<-metabolite[,i] # these are the observed values we'll try to predict
+  print(paste("Trying to predict ",parameter," --- ",i,sep=""))
+  # We perform the sPLS, trying to predict our specific metabolite vector (metabolite[,i]) using our whole OTU table. Validation is LOO, so "Leave one out", i.e. we train model on n-1 samples and try to predict the value for the remaining one. the "method" argument is to chose the correct type of sPLS
+  pls_result<-plsr(obs_values ~ spls_dataset, validation="LOO",method="oscorespls") 
+  # Now we check the vector of r2 (sPLS tries to use different numbers of OTUs and provides a correlation between predicted and observed for each of them, so we get a vectore of r2 and not just one r2 value)
+  r2_vector<-R2(pls_result)
+  max<-0
+  max_comp<--1
+  for (j in 1:length(r2_vector$val)){
+    if(!(is.na(r2_vector$val[j]))){
+      if(r2_vector$val[j]>th_r2){
+        if(r2_vector$val[j]>max){
+          max<-r2_vector$val[j]
+          max_comp<-r2_vector$comp[j]
+        }
+      }
+    }
+  }
+  print(paste(" the max r2 is ",max," corresponding to comp ",max_comp,sep=""))
+}
+
+# So here we print the highest r2 across all predictions.
+
+
+#Step 3: Plotting the results
+
+## So now we can look at the metabolites, and see if any can be predicted by the OTUs abundance
+i<-20 #this number corresponds to the "iteration" of the prediction. E.g. prediction 1, prediction 2, prediction 3, etc. Change it to whatever yours is.
+
+# And we regenerate the corresponding results
+parameter<-colnames(metabolite)[i]
+obs_values<-metabolite[,i] # these are the observed values we'll try to predict
+pls_result<-plsr(obs_values ~ spls_dataset, validation="LOO",method="oscorespls") 
+r2_vector<-R2(pls_result)
+max<-0
+max_comp<--1
+for (j in 1:length(r2_vector$val)){
+  if(!(is.na(r2_vector$val[j]))){
+    if(r2_vector$val[j]>th_r2){
+      if(r2_vector$val[j]>max){
+        max<-r2_vector$val[j]
+        max_comp<-r2_vector$comp[j]
+      }
+    }
+  }
+}
+
+
+# Plotting predicted vs observed
+df = data.frame(x=obs_values,y=pls_result$validation$pred[,,max_comp])
+df_metadat = cbind(df, metadat)
+colnames(df) = c("x","y")
+pdf(
+  paste("measured_vs_predicted_", parameter, ".pdf"),
+  width = 8,  # Set your desired width
+  height = 6   # Set your desired height
+)
+
+ggplot(data = df_metadat) +
+  geom_point(aes(x = x, y = y, color = as.factor(moisture), size=4)) +
+  geom_smooth(aes(x = x, y = y), method = "lm") +
+  xlab("Measured") +
+  ylab("Predicted") +
+  ggtitle(paste("Comparison of ", parameter, " measured vs predicted -- r2=", max)) +
+  theme(axis.text = element_text(color = "black", size = 10), axis.ticks = element_line(color = "black"))
+
+dev.off()
+
+fit = lm(y ~ x, data = df) #get a pvalue for a linear model of predicted vs observed.
+summary(fit)
+
+# So next we checking the VIP (variable importance in projection), and output a table of the 100 highest values, this will tell us which OTU you need to know the abundance of to correctly predict the feature of interest
+output<-paste("VIP_values_with_",parameter,".csv",sep="")
+cat("Rank,OTU,VIP\n",file = output,append=FALSE)
+vip_result<-VIP(pls_result)
+vip_components<-sort(vip_result[max_comp,],decreasing=TRUE)[1:100]
+for (k in 1:100){
+  cat(paste(k,names(vip_components[k]),vip_components[k],"\n",sep=","),file=output,append=TRUE)
+}
+## Check the correlation between predicted and modeled (should be consistent with what plsr gave us)
+cor.test(df$x,df$y)
+## Alternatively, we can also use the built-in function "predplot" but I find it less pretty
+## Can be good to double check the ggplot2 plot though (should be the same)
+predplot(pls_result,ncomp=max_comp)
+
+## Now we can also plot individual OTUs vs n_per based on the VIP list
+for (k in 1:10) {
+  OTU <- unlist(names(vip_components[k]))
+  vec_OTU <- spls_dataset[, OTU]
+  df_metadat <- data.frame(x = vec_OTU, y = obs_values)
+  df_metadat <- cbind(df_metadat, metadat)
+  
+  # Create the plot
+  p <- ggplot(data = df_metadat) +
+    geom_point(aes(x = x, y = y, color = as.factor(moisture), size = 4)) +
+    geom_smooth(aes(x = x, y = y), method = "lm") +
+    xlab(OTU) +
+    ylab(paste("Measured ", parameter, sep = "")) +
+    ggtitle(paste("Comparison of ", OTU, " vs measured ", parameter)) +
+    theme(axis.text = element_text(color = "black", size = 10), axis.ticks = element_line(color = "black"))
+  
+  # Print and save the plot
+  print(p)
+  ggsave(paste0("plot_", k, ".pdf"), plot = p, device = "pdf", width = 8, height = 6, units = "in")
+}
+
+```
+
+#Linking metabolites to specific metabolisms
+```{r Ectoine and Putrescine production across treatments}
+#Now, for my final trick i will link the metabolite information to the microbial metabolism.
+
+#Supplementary_Table_ExternallyHosted_annots.xlsx table A
+raw_annotations = read.delim("_MSC1_29_MAGs_annotations_final.tsv", sep = "\t", header = T)
+
+raw_annotations$full_id=raw_annotations$X #rename the column "x". 
+raw_annotations = raw_annotations %>%
+  select(full_id, everything()) %>%
+  select(-c("X")) %>%
+  mutate(full_id = str_remove(full_id, ".*_renamed_")) #just re-organize everything to make pretty.
+
+#Now, in addition to DRAM, i also ran eggNOG. DRAM is the superior annotation method in this case because it is alignment based, not just hmm based... but I want to make sure that I cast the broadest net possible here so that I do not miss anything. I am bringing in the eggNOG annotations here, however the annotation "logic" will be that for a call to be made, at least two different annotation methods FROM DRAM (i.e, KEGG + DBCAN + MEROPS + PFAM + VOG) need to agree. This will help reduce false positives and false negatives (because eggNOG is much less stringent). 
+
+#Supplementary_Table_ExternallyHosted_annots.xlsx table B
+eggNOG_annotations = read.delim("_eggnog_annotation.emapper.annotations.txt", sep = "\t", header = T)
+
+#From here, i'm only really going to keep the Preferred Name, EC Number, and KEGG Ko. And of course the name.
+eggNOG_annotations = eggNOG_annotations %>%
+  select(c(X.query, Preferred_name, EC, KEGG_ko))
+
+#Note: eggNOG even misses to recognize certain sequences as genes even though they are already called by DRAM. But whatever we'll consider those "none" by eggNOG standards. This will become apparent now when I left join to the DRAM annots.
+
+DRAM_eggNOG_annotations = left_join(raw_annotations, eggNOG_annotations, by=c("full_id"="X.query"))
+
+TPM_gene_resolved_wide_metaT_renamed = TPM_gene_resolved_wide_metaT %>%
+  mutate(gene_id = str_remove(gene_id, ".*_50-10_")) #just re-organize everything to make pretty.
+
+#I'm just going to merge these out with the normal annotations as a separate thing so i can write it out.
+DRAM_eggNOG_annotations_expression = left_join(DRAM_eggNOG_annotations, TPM_gene_resolved_wide_metaT_renamed, by=c("full_id"="gene_id"))
+
+TPM_gene_resolved_wide_metaT_renamed = TPM_gene_resolved_wide_metaT %>%
+  mutate(gene_id = str_remove(gene_id, ".*_50-10_")) #just re-organize everything to make pretty.
+
+#write.csv(DRAM_eggNOG_annotations_expression, file="All_Annotations_w_Expression.csv")
+
+#Ok - so now i'm just going to make a list of genes related to ectoine synthesis and degradation that i'm going to filter by. I'm basing this from this paper: https://microbialcellfactories.biomedcentral.com/articles/10.1186/s12934-021-01567-6
+
+ectoine_synthesis.ko = c("K00928|K12524|K12525|K12526|K00836|K06718|K10674|K06720|K03735|K03736")
+ectoine_synthesis.ec = c("2.7.2.4|1.2.1.11|2.6.1.76|2.3.1.178|1.14.11.55|4.2.1.108|4.3.1.7")
+ectoine_degradation.ko = c("K15783|K15784|K15785|K15786") #im going to focus on just production but writing out.
+ectoine_degradation.ec = c("3.5.4.44|3.5.1.125|2.6.1.76|1.2.1.-") #im going to focus on just production but writing out.
+
+ko.annot_egg.synth = DRAM_eggNOG_annotations[grep(ectoine_synthesis.ko, DRAM_eggNOG_annotations$KEGG_ko),]
+ko.annot_DRAM.synth = DRAM_eggNOG_annotations[grep(ectoine_synthesis.ec, DRAM_eggNOG_annotations$ko_id),]
+ec.annot.synth = DRAM_eggNOG_annotations[grep(ectoine_synthesis.ec, DRAM_eggNOG_annotations$EC),]
+
+#Cool - now lets merge them into one and derep just in case there are some duplicates here (there should be)
+
+merged_annotations_ectoine_synth <- bind_rows(
+  ko.annot_egg.synth,
+  ko.annot_DRAM.synth,
+  ec.annot.synth
+) %>% distinct()
+
+#alright - here we are. Going to write this out so i can look at it and see if i can code up some rules maybe.
+#write.csv(merged_annotations_ectoine_synth, file="ectoine.synth_metabolism_genes.csv")
+
+#order preference is as follows: If the KO_id from DRAM's KEGG mmseqs alignment agrees with the KO of what we want, take it regardless of what other less strict annotations say.
+
+merged_annotations_wCalls_ectoine <- merged_annotations_ectoine_synth %>%
+  mutate(Confirmation_Column = ifelse(grepl(paste(ectoine_synthesis.ko, collapse = "|"), ko_id), "DRAM KEGG confirmed", NA))
+
+sum(is.na(merged_annotations_wCalls_ectoine$Confirmation_Column)) #so that took care of 168 of my 518 genes. Now, i'm going to go in and figure out the remaining 350. I want to make sure that at least 2/4 methods here agree: KEGG, PFAM, CAZY, or MEROPS. Problem is that these aren't really in a similar format. I may just have to do this manually. Ugh.
+
+#write.csv(merged_annotations_wCalls_ectoine, file="ectoine_synthesis_metabolism_genes_wCalls.csv")
+
+#I did it manually. Reading file back in. 
+#Supplementary_Table_X_metabolisms.xlsx table B
+ectoine_synthesis_df_full=read.csv("ectoine_synthesis_metabolism_genes_wCalls.csv")
+
+ectoine_synthesis_df_full_wExpression = ectoine_synthesis_df_full %>%
+  left_join(TPM_gene_resolved_wide_metaT_renamed, by=c("full_id"="gene_id")) %>%
+  select(-c(4:9)) %>%
+  select(-c(22:25))
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans <- ectoine_synthesis_df_full_wExpression %>%
+  mutate(
+    structure_mean = rowMeans(select(., 29:33)),
+    nostructure_mean = rowMeans(select(., 34:38)),
+    highmoisture_mean = rowMeans(select(., 34:38)),
+    lowmoisture_mean = rowMeans(select(., 44:48))
+  )
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short = TPM_gene_resolved_wide_metaT_renamed_wMeans %>%
+  select(-c(29:48)) %>%
+  select(-c(1:25)) %>%
+  select(-c(2))
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short$taxonomy=sub(".*g__", "g__", TPM_gene_resolved_wide_metaT_renamed_wMeans_short$taxonomy)
+
+ectoin_synthesis_long_df <- TPM_gene_resolved_wide_metaT_renamed_wMeans_short %>%
+  pivot_longer(
+    cols = c("structure_mean", "nostructure_mean", "highmoisture_mean", "lowmoisture_mean"),
+    names_to = "ColumnName",
+    values_to = "MeanValue"
+  )
+
+# Subset the data for structure_mean vs nostructure_mean
+ectoin_synthesis_long_df_structure <- subset(ectoin_synthesis_long_df, ColumnName %in% c("structure_mean"))
+ectoin_synthesis_long_df_nostructure <- subset(ectoin_synthesis_long_df, ColumnName %in% c("nostructure_mean"))
+
+#OK now i want to make these just at a bulk level for the metabolism across all samples per treatment. so lets process this a little differently.
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_ectoine_structure_subs=TPM_gene_resolved_wide_metaT_renamed_wMeans[
+  , c(1:28, which(colnames(TPM_gene_resolved_wide_metaT_renamed_wMeans) %in% structure_samples))
+]
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_subs = TPM_gene_resolved_wide_metaT_renamed_wMeans %>%
+  select(c(28:48)) %>%
+  pivot_longer(-taxonomy,
+    names_to = "Sample",
+    values_to = "TPM_Expression"
+  ) #pivot longer and trim
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_subs$taxonomy=sub(".*g__", "g__", TPM_gene_resolved_wide_metaT_renamed_wMeans_subs$taxonomy)
+
+mcolors_ectoine=c("#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#FF9C62", "#c5c5c5", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#de9400")
+
+ggplot_stackedBars_ectoine = TPM_gene_resolved_wide_metaT_renamed_wMeans_subs %>%
+  ggplot(aes(fill=taxonomy, y=TPM_Expression, x=Sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors_ectoine) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Summed TPM (ectoine synthesis)") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG expression contributing to Ectoine Synthesis") +
+  theme(plot.title = element_text(hjust = 0.5))
+#ggsave(ggplot_stackedBars_ectoine, file="evctoine_synthesis_structure.pdf", width = 12, height = 7, units = "in")
+
+#
+#Now lets do this for n putrescine.
+#
+
+nputrescine_synthesis.ko = c("K11073|K11076|K11075|K11074|K01585|K10536|K12251|K01581|K01480")
+nputrescine_synthesis.ec = c("7.6.2.16|4.1.1.19|3.5.3.12|3.5.1.53|4.1.1.17|3.5.3.11")
+
+ko.annot_egg.synth = DRAM_eggNOG_annotations[grep(nputrescine_synthesis.ko, DRAM_eggNOG_annotations$KEGG_ko),]
+ko.annot_DRAM.synth = DRAM_eggNOG_annotations[grep(nputrescine_synthesis.ec, DRAM_eggNOG_annotations$ko_id),]
+ec.annot.synth = DRAM_eggNOG_annotations[grep(nputrescine_synthesis.ec, DRAM_eggNOG_annotations$EC),]
+
+#Cool - now lets merge them into one and derep just in case there are some duplicates here (there should be)
+
+merged_annotations_nputrescine_synth <- bind_rows(
+  ko.annot_egg.synth,
+  ko.annot_DRAM.synth,
+  ec.annot.synth
+) %>% distinct()
+
+merged_annotations_wCalls_nputrescine_synth <- merged_annotations_nputrescine_synth %>%
+  mutate(Confirmation_Column = ifelse(grepl(paste(nputrescine_synthesis.ko, collapse = "|"), ko_id), "DRAM KEGG confirmed", NA))
+
+#write.csv(merged_annotations_wCalls_nputrescine_synth, file="nputrescine.synth_metabolism_genes.csv")
+
+###############
+###############
+
+#Supplementary_Table_X_metabolisms.xlsx table C
+nputrescine_synthesis_df_full=read.csv("nputrescine.synth_metabolism_genes_wCalls_input.csv")
+
+nputrescine_synthesis_df_full_wExpression = nputrescine_synthesis_df_full %>%
+  left_join(TPM_gene_resolved_wide_metaT_renamed, by=c("full_id"="gene_id")) %>%
+  select(-c(4:9)) %>%
+  select(-c(22:25))
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans <- nputrescine_synthesis_df_full_wExpression %>%
+  mutate(
+    structure_mean = rowMeans(select(., 29:33)),
+    nostructure_mean = rowMeans(select(., 34:38)),
+    highmoisture_mean = rowMeans(select(., 34:38)),
+    lowmoisture_mean = rowMeans(select(., 44:48))
+  )
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short = TPM_gene_resolved_wide_metaT_renamed_wMeans %>%
+  select(-c(29:48)) %>%
+  select(-c(1:25)) %>%
+  select(-c(2))
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short$taxonomy=sub(".*g__", "g__", TPM_gene_resolved_wide_metaT_renamed_wMeans_short$taxonomy)
+
+nputrescine_long_df <- TPM_gene_resolved_wide_metaT_renamed_wMeans_short %>%
+  pivot_longer(
+    cols = c("structure_mean", "nostructure_mean", "highmoisture_mean", "lowmoisture_mean"),
+    names_to = "ColumnName",
+    values_to = "MeanValue"
+  )
+
+# Subset the data for structure_mean vs nostructure_mean
+nputrescine_long_df_structure <- subset(nputrescine_long_df, ColumnName %in% c("structure_mean"))
+nputrescine_long_df_nostructure <- subset(nputrescine_long_df, ColumnName %in% c("nostructure_mean"))
+
+#OK now i want to make these just at a bulk level for the metabolism across all samples per treatment. so lets process this a little differently.
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_nputrescine_structure_subs=TPM_gene_resolved_wide_metaT_renamed_wMeans[
+  , c(1:28, which(colnames(TPM_gene_resolved_wide_metaT_renamed_wMeans) %in% structure_samples))
+]
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_subs = TPM_gene_resolved_wide_metaT_renamed_wMeans %>%
+  select(c(28:48)) %>%
+  pivot_longer(-taxonomy,
+    names_to = "Sample",
+    values_to = "TPM_Expression"
+  ) #pivot longer and trim
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_subs$taxonomy=sub(".*g__", "g__", TPM_gene_resolved_wide_metaT_renamed_wMeans_subs$taxonomy)
+
+mcolors_nputrescine=c("#8B6220", "#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#c5c5c5", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#de9400")
+
+ggplot_stackedBars_nputrescine = TPM_gene_resolved_wide_metaT_renamed_wMeans_subs %>%
+  ggplot(aes(fill=taxonomy, y=TPM_Expression, x=Sample)) + 
+  geom_bar(position = "stack", stat="identity") +
+  scale_fill_manual(values=mcolors_nputrescine) + 
+  theme(legend.text=element_text(size=8)) +
+  theme(axis.text.x = element_text(angle=90)) +
+  ylab("Summed TPM (nputrescine synthesis)") +
+  xlab("Sample") +
+  labs(title="Stacked bar chart of MAG expression contributing to nputrescine Synthesis") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_cartesian(ylim = c(0, 1500))  # Set x-axis limits to 0 and 1200
+
+#ggsave(ggplot_stackedBars_nputrescine, file="nputrescine_synthesis_structure.pdf", width = 12, height = 7, units = "in")
+
+
+```
+
+#Chitin degradation steps across treatments
+```{r Chitin degradation steps across treatments}
+#This is all looking good, now i think that the final thing missing is to reel this all back in for the chitin degradation. Instead of using the metabolism_summary sheet that I used in the DESEQ figure/analyses, i'm going to manually curate this a little bit more. As such, i'm going to go into the raw annotation file here and dig around some more. Sometimes, chitin degradation is a little messy, and as such I want to make sure that for this figure i am not misrepresenting anything. Reading in the original annotation file from DRAM:
+
+#Supplementary_Table_ExternallyHosted_annots.xlsx Table A
+raw_annotations = read.delim("_MSC1_29_MAGs_annotations_final.tsv", sep = "\t", header = T)
+
+raw_annotations$full_id=raw_annotations$X #rename the column "x". 
+raw_annotations = raw_annotations %>%
+  select(full_id, everything()) %>%
+  select(-c("X")) %>%
+  mutate(full_id = str_remove(full_id, ".*_renamed_")) #just re-organize everything to make pretty.
+
+#Now, in addition to DRAM, i also ran eggNOG. DRAM is the superior annotation method in this case because it is alignment based, not just hmm based... but I want to make sure that I cast the broadest net possible here so that I do not miss anything. I am bringing in the eggNOG annotations here, however the annotation "logic" will be that for a call to be made, at least two different annotation methods FROM DRAM (i.e, KEGG + DBCAN + MEROPS + PFAM + VOG) need to agree. This will help reduce false positives and false negatives (because eggNOG is much less stringent). 
+
+#Supplementary_Table_ExternallyHosted_annots.xlsx Table B.
+eggNOG_annotations = read.delim("_eggnog_annotation.emapper.annotations.txt", sep = "\t", header = T)
+
+#From here, i'm only really going to keep the Preferred Name, EC Number, and KEGG Ko. And of course the name.
+eggNOG_annotations = eggNOG_annotations %>%
+  select(c(X.query, Preferred_name, EC, KEGG_ko))
+
+#Note: eggNOG even misses to recognize certain sequences as genes even though they are already called by DRAM. But whatever we'll consider those "none" by eggNOG standards. This will become apparent now when I left join to the DRAM annots.
+
+DRAM_eggNOG_annotations = left_join(raw_annotations, eggNOG_annotations, by=c("full_id"="X.query"))
+
+TPM_gene_resolved_wide_metaT_renamed = TPM_gene_resolved_wide_metaT %>%
+  mutate(gene_id = str_remove(gene_id, ".*_50-10_")) #just re-organize everything to make pretty.
+
+#I'm just going to merge these out with the normal annotations as a separate thing so i can write it out.
+DRAM_eggNOG_annotations_expression = left_join(DRAM_eggNOG_annotations, TPM_gene_resolved_wide_metaT_renamed, by=c("full_id"="gene_id"))
+
+#write.csv(DRAM_eggNOG_annotations_expression, file="All_Annotations_w_Expression.csv")
+
+#Ok - so now i'm just going to make a list of genes related to chitin degradation that i'm going to filter by. I'm basing this quite a bit on the logic that was used by the MSC2 analyses, however I am adding a few that I thought were missing.
+
+chitin.cazy = c("^AA10|^GH18|^GH19|^GH23|^GH73|^GH3|^GH5|^GH20|^CE4|^CE9")
+chitin.ko = c("K01183|K03791|K01185|K01207|K12373|K18675|K00884|K01443|K02564|K01452|K18676|K02804|K02765|K07106|K22292|K07102|K00992")
+chitin.ec = c("3.2.1.14|3.2.1.17|3.2.1.52|2.7.1.59|3.5.1.25|3.5.99.6|3.5.1.41|2.7.1.8|2.7.1.193|2.7.1-|4.2.1.126|3.1.3.105|2.7.1.221|2.7.7.99")
+
+cazy.annot = DRAM_eggNOG_annotations[grep(chitin.cazy, DRAM_eggNOG_annotations$cazy_best_hit),]
+ko.annot_egg = DRAM_eggNOG_annotations[grep(chitin.ko, DRAM_eggNOG_annotations$KEGG_ko),]
+ko.annot_DRAM = DRAM_eggNOG_annotations[grep(chitin.ko, DRAM_eggNOG_annotations$ko_id),]
+ec.annot = DRAM_eggNOG_annotations[grep(chitin.ec, DRAM_eggNOG_annotations$EC),]
+
+#Cool - now lets merge them into one and derep just in case there are some duplicates here (there should be)
+
+merged_annotations <- bind_rows(
+  cazy.annot,
+  ko.annot_egg,
+  ko.annot_DRAM,
+  ec.annot
+) %>% distinct()
+
+#alright - here we are. Going to write this out so i can look at it and see if i can code up some rules maybe.
+#write.csv(merged_annotations, file="chitin_metabolism_genes.csv")
+
+#order preference is as follows: If the KO_id from DRAM's KEGG mmseqs alignment agrees with the KO of what we want, take it regardless of what other less strict annotations say.
+
+merged_annotations_wCalls <- merged_annotations %>%
+  mutate(Confirmation_Column = ifelse(grepl(paste(chitin.ko, collapse = "|"), ko_id), "DRAM KEGG confirmed", NA))
+
+sum(is.na(merged_annotations_wCalls$Confirmation_Column)) #so that took care of 168 of my 518 genes. Now, i'm going to go in and figure out the remaining 350. I want to make sure that at least 2/4 methods here agree: KEGG, PFAM, CAZY, or MEROPS. Problem is that these aren't really in a similar format. I may just have to do this manually. Ugh.
+#write.csv(merged_annotations_wCalls, file="chitin_metabolism_genes_wCalls.csv")
+
+#FINAL RULESET:
+#If KEGG KO with a reverse best hit says that it's something in chitin, then take that as truth. If KEGG K0 disagrees with something and is a RBH, remove and take that as truth. If KEGG K0 is not a RBH, go for manual curation steps: 1) DRAM KEGG RBH confirmed. 2) DRAM KEGG no-RBH + eggNOG KO hit. 3) Two tools agree.
+
+#Supplementary_Table_X_metabolisms.xlsx Table A
+chitin_degradation_df=read.csv("chitin_metabolism_genes_wCalls_input.csv")
+
+#File = supplementary file 1 Table F
+gene_to_MAG_conversion_table = read.delim("_scaffold_to_MAG_conversion_table_v4.txt", header = T, sep = "\t")
+gene_to_MAG_conversion_table = gene_to_MAG_conversion_table %>%
+  select(final_MAG_gene_id, genome_id, final_scaffold_id_or_in_house_srmg_id, size)
+
+chitin_degradation_df_wExpression = chitin_degradation_df %>%
+  left_join(TPM_gene_resolved_wide_metaT_renamed, by=c("full_id"="gene_id")) %>%
+  select(-c(4:9)) %>%
+  select(-c(22:25)) #left merge to bring in the expression data
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans <- chitin_degradation_df_wExpression %>%
+  mutate(
+    nostructure_mean = rowMeans(select(., 29:33)),
+    structure_mean = rowMeans(select(., 34:38)),
+    highmoisture_mean = rowMeans(select(., 34:38)),
+    lowmoisture_mean = rowMeans(select(., 44:48))
+  ) #calculate the mean expression
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short = TPM_gene_resolved_wide_metaT_renamed_wMeans %>%
+  select(-c(29:48)) %>%
+  select(-c(1:25)) %>%
+  select(-c(2))
+
+#im going to bring in the proteome here as well just in case.
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short_forMerge = TPM_gene_resolved_wide_metaT_renamed_wMeans %>%
+  select(-c(4:25, 27, 29:48))
+  
+genome_metaP_counts_filtered_norm_forMerge = gene_metaP_counts_filtered_norm %>%
+  rownames_to_column(var="gene_id") %>%
+  left_join(gene_to_MAG_conversion_table, by=c("gene_id"="final_scaffold_id_or_in_house_srmg_id")) %>%
+  select(final_MAG_gene_id, genome_id, everything(), gene_id) %>%
+  select(-c(3, 20)) %>%
+  mutate(
+    nostructure_meanNSAF = rowMeans(select(., 3:5)),
+    structure_meanNSAF = rowMeans(select(., 6:10)),
+    highmoisture_meanNSAF = rowMeans(select(., 6:10)),
+    lowmoisture_meanNSAF = rowMeans(select(., 16:18))) #calculate mean expression
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_metaP_metaT = TPM_gene_resolved_wide_metaT_renamed_wMeans_short_forMerge %>%
+  left_join(genome_metaP_counts_filtered_norm_forMerge, by=c("full_id"="final_MAG_gene_id")) %>%
+  select(-c(10:26)) #this one has my metaP data.
+
+######
+#Plot the metaT first.
+######
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_short$taxonomy=sub(".*g__", "g__", TPM_gene_resolved_wide_metaT_renamed_wMeans_short$taxonomy)
+
+chitin_long_df <- TPM_gene_resolved_wide_metaT_renamed_wMeans_short %>%
+  pivot_longer(
+    cols = c("structure_mean", "nostructure_mean", "highmoisture_mean", "lowmoisture_mean"),
+    names_to = "ColumnName",
+    values_to = "MeanValue"
+  ) #pivot longer here to make column be the treatments.
+
+# Subset the data for structure_mean vs nostructure_mean
+chitin_long_df_structure <- subset(chitin_long_df, ColumnName %in% c("structure_mean"))
+chitin_long_df_nostructure <- subset(chitin_long_df, ColumnName %in% c("nostructure_mean"))
+
+
+mcolors_chitin=c("#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#ff9c62", "#c5c5c5", "#104a62", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#de9400")
+
+# Create butterfly plot for highmoisture_mean vs lowmoisture_mean
+p1 <- ggplot(chitin_long_df_structure, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin) +
+  labs(title = "Structure", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 200))  # Set x-axis limits to 0 and 1200
+
+filtered_data_00_01 <- chitin_long_df_structure %>%
+  filter(call %in% c("[00]", "[01]"))
+
+mcolors_chitin_structure_filt=c("#c5ac73", "#628b29", "#b4cd6a", "#c5c5c5", "#737b94", "#eeca03")
+
+# Create butterfly plot for highmoisture_mean vs lowmoisture_mean
+p1.5 <- ggplot(filtered_data_00_01, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin_structure_filt) +
+  labs(title = "Structure", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 200))  # Set x-axis limits to 0 and 120
+
+p2 <- ggplot(chitin_long_df_nostructure, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin) +
+  labs(title = "No Structure", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 200))  # Set x-axis limits to 0 and 1200
+
+filtered_data_00_01_noStruct <- chitin_long_df_nostructure %>%
+  filter(call %in% c("[00]", "[01]"))
+
+mcolors_chitin_nostructure_filt=c("#c5ac73", "#628b29", "#b4cd6a", "#c5c5c5", "#737b94", "#eeca03")
+
+p2.5 <- ggplot(filtered_data_00_01_noStruct, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin_nostructure_filt) +
+  labs(title = "No Structure", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 1250))  # Set x-axis limits to 0 and 1200
+
+combined_plot = p1 + p2 + plot_layout(ncol = 2)
+combined_plot
+#ggsave(combined_plot, file="structure_vs_nostructure_butterfly.pdf", width = 20, height = 7, units = "in")
+
+#ggsave(p1.5, file="structure_vs_nostructure_butterfly_p1.5asdf.pdf", width = 20, height = 7, units = "in")
+
+#ggsave(p2.5, file="structure_vs_nostructure_butterfly_p2.5asdf.pdf", width = 20, height = 7, units = "in")
+
+#now moisture
+chitin_long_df_high_moisture <- subset(chitin_long_df, ColumnName %in% c("highmoisture_mean"))
+chitin_long_df_low_moisture <- subset(chitin_long_df, ColumnName %in% c("lowmoisture_mean"))
+
+# Create butterfly plot for highmoisture_mean vs lowmoisture_mean
+p1_moist <- ggplot(chitin_long_df_high_moisture, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin) +
+  labs(title = "High moisture", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 200))  # Set x-axis limits to 0 and 1200
+p2_moist <- ggplot(chitin_long_df_low_moisture, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin) +
+  labs(title = "Low moisture", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 200))  # Set x-axis limits to 0 and 1200
+
+combined_plot_moisture = p1_moist + p2_moist + plot_layout(ncol = 2)
+combined_plot_moisture
+#ggsave(combined_plot_moisture, file="highmoist_vs_lowmoist_butterfly.pdf", width = 20, height = 7, units = "in")
+
+#Now before I leave im making a final plot that just has the overall expression of these organisms in relation to some general metabolic categories.. Did a very bulk and coarse categorization of all the genes and just going to make this figure here. It's using DRAM calls by the metabolic speradsheet (same as above for DESEQ2), and then a BRITE hierarchy categorization for those that were not in DRAM. Squishy- but better than not knowing. I'm removing the hypotheticals and unknowns because they're just not really useful. Using mean TPM to plot. (Looks basically identical to the rpk anyways).
+
+metabs_general=read.csv("chitin_degradation_figure/bars_general_metabolisms.csv")
+metabs_general$taxonomy = sub(".*?;g", "g", metabs_general$taxonomy) #make pretty.
+metabolic_bars_general=ggplot(metabs_general, aes(x = taxonomy, y = overall_avg, fill = barplot_categories_modified)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Stacked Bar Plot",
+       x = "Taxonomy",
+       y = "Overall Average") +
+  theme_minimal() +
+  scale_fill_manual(values = mcolors) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+#ggsave(metabolic_bars_general, file="metabolism_general_bars_redo_rpk.pdf", width = 12, height = 12, units = "in")
+
+#Now lets plot the metaP - i'm not going to visualize this in this manner i think - going to just put in different processes that were detected in the metaP becuase i think this will be pretty low.
+TPM_gene_resolved_wide_metaT_renamed_wMeans_metaP_metaT = TPM_gene_resolved_wide_metaT_renamed_wMeans_short_forMerge %>%
+  left_join(genome_metaP_counts_filtered_norm_forMerge, by=c("full_id"="final_MAG_gene_id")) %>%
+  select(-c(1:3, 6:26)) #this one has my metaP data.
+
+#write.csv(genome_metaP_counts_filtered_norm_forMerge, file="metaP_NSAF_avgs.csv")
+
+######
+#Plot the metaP now.
+######
+
+TPM_gene_resolved_wide_metaT_renamed_wMeans_metaP_metaT$taxonomy=sub(".*g__", "g__", TPM_gene_resolved_wide_metaT_renamed_wMeans_metaP_metaT$taxonomy)
+
+chitin_long_df_NSAF <- TPM_gene_resolved_wide_metaT_renamed_wMeans_metaP_metaT %>%
+  pivot_longer(
+    cols = c("structure_meanNSAF", "nostructure_meanNSAF", "highmoisture_meanNSAF", "lowmoisture_meanNSAF"),
+    names_to = "ColumnName",
+    values_to = "MeanValue"
+  ) #pivot longer here to make column be the treatments.
+
+# Subset the data for structure_mean vs nostructure_mean
+chitin_long_df_structure_NSAF <- subset(chitin_long_df_NSAF, ColumnName %in% c("structure_meanNSAF"))
+chitin_long_df_nostructure_NSAF <- subset(chitin_long_df_NSAF, ColumnName %in% c("nostructure_meanNSAF"))
+
+mcolors_chitin_NSAF=c("#4f3200", "#ffcdbd", "#628b29", "#b4cd6a", "#419cbd", "#83deff", "#eeffc5", "#ee6241", "#eeca03")
+
+
+# Create butterfly plot for highmoisture_mean vs lowmoisture_mean
+p1 <- ggplot(chitin_long_df_structure_NSAF, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin_NSAF) +
+  labs(title = "Structure", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 1000))  # Set x-axis limits to 0 and 1200
+
+p2 <- ggplot(chitin_long_df_nostructure_NSAF, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin_NSAF) +
+  labs(title = "No Structure", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 1000))  # Set x-axis limits to 0 and 1200
+
+combined_plotNSAF = p1 + p2 + plot_layout(ncol = 2)
+combined_plotNSAF
+#ggsave(combined_plotNSAF, file="structure_vs_nostructure_butterfly_NSAF.pdf", width = 20, height = 7, units = "in")
+
+#now NSAF just in case - probably won't use this though.
+chitin_long_df_high_moistureNSAF <- subset(chitin_long_df_NSAF, ColumnName %in% c("highmoisture_meanNSAF"))
+chitin_long_df_low_moistureNSAF <- subset(chitin_long_df_NSAF, ColumnName %in% c("lowmoisture_meanNSAF"))
+
+# Create butterfly plot for highmoisture_mean vs lowmoisture_mean
+p1_moistNSAF <- ggplot(chitin_long_df_high_moistureNSAF, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin_NSAF) +
+  labs(title = "High moisture", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 1000))  # Set x-axis limits to 0 and 1200
+p2_moistNSAF <- ggplot(chitin_long_df_low_moistureNSAF, aes(x = call, y = MeanValue, fill = taxonomy)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_manual(values=mcolors_chitin_NSAF) +
+  labs(title = "Low moisture", y = "Mean Value") +
+  coord_cartesian(ylim = c(0, 1000))  # Set x-axis limits to 0 and 1200
+
+combined_plot_moistureNSAF = p1_moistNSAF + p2_moistNSAF + plot_layout(ncol = 2)
+combined_plot_moistureNSAF
+#ggsave(combined_plot_moistureNSAF, file="highmoist_vs_lowmoist_butterfly_NSAF.pdf", width = 20, height = 7, units = "in")
+
+```
+
+#Bar-plots for glyoxylate shunt genes
+```{r Glyoxylate shunt}
+#Plotting out all of the genes that are present in the glyoxylate shunt and its surrounding by-products.
+glyoxylate_annotations = read.delim("glyoxylate_shunt_genes.csv", sep = ",", header = T)
+  
+#making a color palette that matches the original.
+mcolors_glyoxy=c("#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#628b29","#254c00", "#b4cd6a", "#e66294", "#bd4141", "#ff9c62", "#c5c5c5", "#104a62", "#419cbd", "#83deff", "#eeffc5",  "#b47bcd", "#ee6241", "#39394a", "#8b949c", "#737b94", "#eeca03", "#de9400")
+
+mcolors_phasin=c("#4f3200", "#c767ff", "#c5ac73", "#ffeea4", "#ffcdbd", "#b4cd6a", "#bd4141", "#c5c5c5", "#104a62", "#83deff", "#eeffc5", "#b47bcd", "#ee6241", "#8b949c", "#737b94", "#de9400")
+
+summarized_glyoxylate_annotations <- glyoxylate_annotations %>%
+  group_by(gene_call, taxonomy) %>%
+  summarize(total_TPM = sum(structure_mean_TPM_metaT, na.rm = TRUE)) %>%
+  filter(total_TPM > 0)
+
+# Clean taxonomy names
+summarized_glyoxylate_annotations$taxonomy <- sub(".*g__", "g__", summarized_glyoxylate_annotations$taxonomy)
+
+# Aggregate total_TPM by gene_call to reorder gene_call
+gene_call_order <- summarized_glyoxylate_annotations %>%
+  group_by(gene_call) %>%
+  summarize(total_TPM_sum = sum(total_TPM)) %>%
+  arrange(desc(total_TPM_sum))
+
+library(forcats)
+library(patchwork)
+# Reorder gene_call factor levels
+summarized_glyoxylate_annotations$gene_call <- factor(summarized_glyoxylate_annotations$gene_call, 
+                                                      levels = gene_call_order$gene_call)
+
+# Split the data into two datasets
+pha_data <- summarized_glyoxylate_annotations %>% filter(gene_call == "Pha")
+other_data <- summarized_glyoxylate_annotations %>% filter(gene_call != "Pha")
+
+# Plot for 'Pha' gene_call
+plot_pha <- ggplot(pha_data, aes(x = gene_call, y = total_TPM, fill = taxonomy)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Summed structure_mean_TPM_metaT for Pha",
+       x = "Gene Call",
+       y = "Summed structure_mean_TPM_metaT") +
+  theme_bw() + 
+  scale_fill_manual(values = mcolors_phasin) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1), legend.position = "none")
+
+# Plot for other gene_calls
+plot_others <- ggplot(other_data, aes(x = gene_call, y = total_TPM, fill = taxonomy)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Summed structure_mean_TPM_metaT for Other Genes",
+       x = "Gene Call",
+       y = "Summed structure_mean_TPM_metaT") +
+  theme_bw() + 
+  scale_fill_manual(values = mcolors_glyoxy) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1), legend.position = "none")
+
+# Combine the plots using patchwork
+combined_plot <- plot_pha | plot_others
+
+# Display the combined plot
+print(combined_plot)
+
+#ggsave(combined_plot, file="glyoxylate_boxplots.pdf", height=7, width=12)
+
+```
